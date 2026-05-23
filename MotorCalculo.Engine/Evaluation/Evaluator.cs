@@ -54,7 +54,7 @@ public static class Evaluator
 
         if (ctx.VariableIdToScope.TryGetValue(varId, out var varScope))
         {
-            if (varScope == "template")
+            if (varScope == "project")
             {
                 // Variável de projecto: ignora lang e lob do contexto
                 effectiveLangId = null;

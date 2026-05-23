@@ -48,7 +48,7 @@ public class VariableEntity
     public string  Code          { get; set; } = "";
     public string  Name          { get; set; } = "";
 
-    /// <summary>"lob" | "language" | "template"</summary>
+    /// <summary>"lob" | "language" | "project"</summary>
     public string  ScopeCode     { get; set; } = "";
     public bool    IsInput        { get; set; }
     public string? ExternalField  { get; set; }

@@ -234,7 +234,7 @@ public sealed class CalculationSession
 
             if (_scopeById.TryGetValue(trigVarId, out var trigScope))
             {
-                if (trigScope == "template") { trigLangId = null; trigLobId = null; }
+                if (trigScope == "project") { trigLangId = null; trigLobId = null; }
                 else if (trigScope == "language")  { trigLobId = null; }
             }
 
@@ -306,7 +306,7 @@ public sealed class CalculationSession
     private IEnumerable<(int? LangId, int? LobId)> GetContexts(VariableDefinition variable) =>
         variable.ScopeCode switch
         {
-            "template" => [(null, null)],
+            "project" => [(null, null)],
             "language" => _project.Languages.Select(l => ((int?)l.LanguageId, (int?)null)),
             "lob"      => _project.Languages
                               .SelectMany(l => l.Lobs

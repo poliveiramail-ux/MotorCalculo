@@ -28,7 +28,11 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     })
-    if (!r.ok) throw new Error(`API POST ${path}: ${r.status}`)
+    if (!r.ok) {
+      let detail = ""
+      try { const j = await r.json(); detail = j.message || j.title || j.detail || JSON.stringify(j) } catch {}
+      throw new Error(`API POST ${path}: ${r.status}${detail ? " — " + detail : ""}`)
+    }
     return r.json()
   }
 }
@@ -40,6 +44,13 @@ const fromLangId = lid => lid ? parseInt(lid.slice(2)) : null
 const fromLobId  = bid => bid ? parseInt(bid.slice(2)) : null
 
 // Carrega todos os dados da API e mapeia para o formato do protótipo
+// Apenas lista de projectos — sem carregar variáveis, versões ou células
+async function loadProjectList() {
+  const projects = await api.get("/projects")
+  if (!projects.length) throw new Error("Sem projectos na base de dados.")
+  return projects
+}
+
 async function loadFromApi(projectId = null) {
   const projects = await api.get("/projects")
   if (!projects.length) throw new Error("Sem projectos na base de dados.")
@@ -94,12 +105,18 @@ async function loadFromApi(projectId = null) {
     colorIdx: i % VER_PALETTE.length
   }))
 
-  // Carrega células da primeira versão
-  const cellsResp = await api.get(`/versions/${apiVersions[0].versionId}/cells`)
-  const protoCells = apiCellsToProto(cellsResp.cells, protoProject, protoVars, apiVersions[0].versionId)
+  // Carrega células de TODAS as versões
+  const allCellsResps = await Promise.all(
+    apiVersions.map(v => api.get(`/versions/${v.versionId}/cells`))
+  )
+  let protoCells = {}
+  for (let i = 0; i < apiVersions.length; i++) {
+    const mapped = apiCellsToProto(allCellsResps[i].cells, protoProject, protoVars, apiVersions[i].versionId)
+    protoCells = { ...protoCells, ...mapped }
+  }
 
-  // Períodos únicos presentes nas células
-  const periodSet = new Set(cellsResp.cells.map(c => c.year * 100 + c.month))
+  // Períodos únicos presentes nas células (usa a primeira versão)
+  const periodSet = new Set(allCellsResps[0].cells.map(c => c.year * 100 + c.month))
   const periods = periodSet.size ? [...periodSet].sort() : [202601, 202602, 202603]
 
   return {
@@ -327,7 +344,7 @@ const computeUpdateOrder = (vars, targetVarIds) => {
   const affected = new Set(targetVarIds)
   let changed = true
   while (changed) { changed = false; for (const [vid, deps] of Object.entries(calcDeps)) { if (!affected.has(vid) && [...deps].some(id => affected.has(id))) { affected.add(vid); changed = true } } }
-  const seq = [...topoSort(vars.filter(v => v.scope === "lob")), ...topoSort(vars.filter(v => v.scope === "language")), ...topoSort(vars.filter(v => v.scope === "template"))].filter(v => affected.has(v.id) && !targetSet.has(v.id))
+  const seq = [...topoSort(vars.filter(v => v.scope === "lob")), ...topoSort(vars.filter(v => v.scope === "language")), ...topoSort(vars.filter(v => v.scope === "project"))].filter(v => affected.has(v.id) && !targetSet.has(v.id))
   const order = {}; seq.forEach((v, i) => { order[v.id] = i + 1 }); return order
 }
 
@@ -475,7 +492,7 @@ const recalcAll = (vars, periods, cl, cs, verId) => {
   const c = { ...cs }, cid = cl.id
   const lobV = topoSort(vars.filter(v => v.scope === "lob"))
   const langV = topoSort(vars.filter(v => v.scope === "language"))
-  const tmplV = topoSort(vars.filter(v => v.scope === "template"))
+  const tmplV = topoSort(vars.filter(v => v.scope === "project"))
   for (const period of [...periods].sort((a, b) => a - b)) {
     const c0 = { cid, ver: verId, period }
     lobV.forEach(v => cl.languages.forEach(lang => lang.lobs.forEach(lob => {
@@ -570,11 +587,11 @@ const DEF_VARS = [
   { id: "v_tot", name: "Total Margem",     scope: "language", formula: "SUM_LOBS(v_mar)",                             alternatives: [], defaultFormula: null },
   { id: "v_eff", name: "Eficiência %",     scope: "language", formula: "SUM_LOBS(v_mar) / SUM_LOBS(v_rec) * 100",   alternatives: [], defaultFormula: null },
   { id: "v_dev", name: "Desvio Budget",    scope: "language", formula: "SUM_LOBS(v_mar) - v_bgt",                   alternatives: [], defaultFormula: null },
-  { id: "v_tgt", name: "Target (€)",       scope: "template", formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_tgr", name: "Receita Global",   scope: "template", formula: "SUM_LANGS(v_trc)",                            alternatives: [], defaultFormula: null },
-  { id: "v_gbl", name: "Margem Global",    scope: "template", formula: "SUM_LANGS(v_tot)",                            alternatives: [], defaultFormula: null },
-  { id: "v_gmg", name: "Margem Global %",  scope: "template", formula: "SUM_LANGS(v_tot) / SUM_LANGS(v_trc) * 100", alternatives: [], defaultFormula: null },
-  { id: "v_gap", name: "Gap vs. Target",   scope: "template", formula: "SUM_LANGS(v_tot) - v_tgt",                   alternatives: [], defaultFormula: null },
+  { id: "v_tgt", name: "Target (€)",       scope: "project", formula: null,                                          alternatives: [], defaultFormula: null },
+  { id: "v_tgr", name: "Receita Global",   scope: "project", formula: "SUM_LANGS(v_trc)",                            alternatives: [], defaultFormula: null },
+  { id: "v_gbl", name: "Margem Global",    scope: "project", formula: "SUM_LANGS(v_tot)",                            alternatives: [], defaultFormula: null },
+  { id: "v_gmg", name: "Margem Global %",  scope: "project", formula: "SUM_LANGS(v_tot) / SUM_LANGS(v_trc) * 100", alternatives: [], defaultFormula: null },
+  { id: "v_gap", name: "Gap vs. Target",   scope: "project", formula: "SUM_LANGS(v_tot) - v_tgt",                   alternatives: [], defaultFormula: null },
   // ── Variáveis com referências absolutas [lang][lob] — demonstração da sintaxe ──
   // v_idx: índice de receita de cada LOB face ao PT/Retalho (base=100)
   //   v_rec         → receita do contexto corrente (relativa)
@@ -586,7 +603,7 @@ const DEF_VARS = [
   { id: "v_dif", name: "Desvio vs PT",      scope: "language", formula: "v_tot - v_tot[PT]",              alternatives: [], defaultFormula: null },
   // v_cmp: rácio de margem total PT/EN × 100
   //   v_tot[PT] e v_tot[EN] são ambas referências absolutas
-  { id: "v_cmp", name: "Rácio PT/EN %",     scope: "template", formula: "v_tot[PT] / v_tot[EN] * 100",   alternatives: [], defaultFormula: null },
+  { id: "v_cmp", name: "Rácio PT/EN %",     scope: "project", formula: "v_tot[PT] / v_tot[EN] * 100",   alternatives: [], defaultFormula: null },
   // ── Variável com fórmulas alternativas — exemplo do mecanismo @ ───────────
   // Resultado Ajustado usa fórmulas diferentes consoante o último input editado:
   //   @ v_prz  →  margem penalizada pelo prazo médio   (v_mar - v_mar * v_prz / 100)
@@ -737,7 +754,7 @@ const DICT = {
 const SC = {
   lob:      { label: "LOB",     badge: "bg-sky-100 text-sky-700",          bg: "bg-sky-50/40" },
   language: { label: "Língua",  badge: "bg-emerald-100 text-emerald-700",  bg: "bg-emerald-50/40" },
-  template: { label: "Projeto", badge: "bg-amber-100 text-amber-700",      bg: "bg-amber-50/40" },
+  project: { label: "Projeto", badge: "bg-amber-100 text-amber-700",      bg: "bg-amber-50/40" },
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -831,7 +848,7 @@ function TemplateModal({ template, vars, onSave, onClose, onNewTemplate, onEditV
   const [name, setName]   = useState(template.name)
   const [desc, setDesc]   = useState(template.description ?? "")
 
-  const scopeOrder = ["lob","language","template"]
+  const scopeOrder = ["lob","language","project"]
   const grouped    = scopeOrder.map(s => ({ scope: s, vars: vars.filter(v => v.scope === s) }))
 
   return (
@@ -1315,7 +1332,7 @@ function VarModal({ variable, variables, client: vClient, onSave, onClose, onDel
             <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome</label><input className={fc("name")} value={name} onChange={e => setName(e.target.value)} placeholder="Receita"/>{errs.name && <p className="text-red-500 text-xs mt-1">{errs.name}</p>}</div>
             <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">ID</label><input className={`${fc("id")} font-mono`} value={id} onChange={e => isNew && setId(e.target.value)} style={{ opacity: isNew ? 1 : 0.6 }} readOnly={!isNew} placeholder="v_receita"/>{errs.id && <p className="text-red-500 text-xs mt-1">{errs.id}</p>}</div>
           </div>
-          <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Âmbito</label><div className="flex gap-2">{["lob","language","template"].map(s => (<button key={s} onClick={() => setScope(s)} className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${scope === s ? SC[s].badge + " ring-2 ring-current ring-offset-1" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>{SC[s].label}</button>))}</div></div>
+          <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Âmbito</label><div className="flex gap-2">{["lob","language","project"].map(s => (<button key={s} onClick={() => setScope(s)} className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${scope === s ? SC[s].badge + " ring-2 ring-current ring-offset-1" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>{SC[s].label}</button>))}</div></div>
           <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Tipo</label><div className="flex rounded-lg overflow-hidden border border-gray-200 w-fit">{[[true,"Input manual"],[false,"Calculado"]].map(([v,l]) => (<button key={l} onClick={() => setIsInput(v)} className={`px-4 py-1.5 text-sm font-medium transition-all ${isInput === v ? "bg-gray-800 text-white" : "bg-white text-gray-500 hover:bg-gray-50"}`}>{l}</button>))}</div></div>
           {!isInput && (<div className="space-y-3">
             {!alts.length ? (<div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Fórmula</label><input className={`${fc("formula")} font-mono`} value={formula} onChange={e => setFormula(e.target.value)} placeholder="v_rec - v_cus"/>{errs.formula ? <p className="text-red-500 text-xs mt-1">{errs.formula}</p> : formula && tryParseValidate(formula, cl).ok ? <p className="text-emerald-600 text-xs mt-1 font-medium">✓ Válida</p> : formula ? <p className="text-red-500 text-xs mt-1">{tryParseValidate(formula, cl).err}</p> : null}</div>)
@@ -1402,7 +1419,7 @@ function GridFilters({
   // Quando muda o âmbito, limpa filtros de língua/lob que não fazem sentido
   const handleScopeChange = val => {
     setFilterScope(val)
-    if (val === 'template') { setFilterLang(''); setFilterLob('') }
+    if (val === 'project') { setFilterLang(''); setFilterLob('') }
     if (val === 'language') { setFilterLob('') }
   }
 
@@ -1421,7 +1438,7 @@ function GridFilters({
         className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
           ${filterScope ? 'border-violet-300 text-violet-700 bg-violet-50' : 'border-gray-200 text-gray-700'}`}>
         <option value="">Todos os âmbitos</option>
-        <option value="template">Apenas Projecto</option>
+        <option value="project">Apenas Projecto</option>
         <option value="language">Apenas Língua</option>
         <option value="lob">Apenas LOB</option>
       </select>
@@ -1591,51 +1608,91 @@ function PeriodRangeSelector({ rangeStart, rangeEnd, setRangeStart, setRangeEnd,
 }
 
 
+
 /* ═══════════════════════════════════════════════════════════════
-   DELTA LOG MODAL — popup com detalhe das variáveis afectadas
+   DELTA LOG MODAL — Sequência de cálculo
    ═══════════════════════════════════════════════════════════════ */
 function DeltaLogModal({ entries, onClose }) {
   if (!entries.length) return null
   const fmt = v => v == null ? "—" : Number(v).toLocaleString("pt-PT", { maximumFractionDigits: 4 })
+  const calcCount = new Set(entries.filter(e => !e.isEdited).map(e => e.varCode)).size
+  const totalRows = entries.filter(e => !e.isEdited).length
+  const periods   = new Set(entries.filter(e => !e.isEdited).map(e => e.period)).size
+  const subtitle  = `${calcCount} var. calculada${calcCount!==1?"s":""} · ${totalRows} entrada${totalRows!==1?"s":""} · ${periods} período${periods!==1?"s":""}`
   return (
     <>
       <div className="fixed inset-0 bg-black/30 z-50" onClick={onClose}/>
-      <div className="fixed bottom-14 left-1/2 -translate-x-1/2 z-50
-                      bg-white rounded-2xl shadow-2xl border border-gray-200
-                      w-full max-w-2xl max-h-96 flex flex-col overflow-hidden">
+      <div className="fixed inset-3 bottom-12 z-50 bg-white rounded-2xl shadow-2xl border border-gray-200
+                      flex flex-col overflow-hidden"
+           style={{ resize: "both", minHeight: "320px", minWidth: "600px" }}>
         {/* Header */}
         <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-orange-400"/>
-            <span className="font-bold text-gray-900 text-sm">
-              {entries.length} variável{entries.length !== 1 ? "es" : ""} afectada{entries.length !== 1 ? "s" : ""}
-            </span>
+          <div className="flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full bg-orange-400 shrink-0"/>
+            <span className="font-bold text-gray-900 text-sm">Sequência de cálculo</span>
+            <span className="text-xs text-gray-400">{subtitle}</span>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">×</button>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none ml-4">×</button>
         </div>
-        {/* Table */}
+        {/* Scrollable table */}
         <div className="overflow-auto flex-1">
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-gray-50 border-b border-gray-200">
+          <table className="text-xs border-collapse" style={{ minWidth: "100%" }}>
+            <thead className="sticky top-0 bg-gray-50 border-b-2 border-gray-200 z-10">
               <tr>
-                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Variável</th>
-                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Contexto</th>
-                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Período</th>
-                <th className="text-right px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Anterior</th>
-                <th className="text-right px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide w-28">Novo</th>
+                <th className="px-3 py-2.5 text-center font-semibold text-gray-400 uppercase tracking-wide whitespace-nowrap">#</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Variável</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-indigo-500 uppercase tracking-wide whitespace-nowrap">Fórmula (ids)</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Contexto</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Período</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Anterior</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Novo</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-emerald-600 uppercase tracking-wide whitespace-nowrap">Fórmula (valores)</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-violet-500 uppercase tracking-wide whitespace-nowrap">Fórmula (nomes)</th>
               </tr>
             </thead>
             <tbody>
               {entries.map((e, i) => (
-                <tr key={i} className={`border-b border-gray-100 ${i % 2 === 0 ? "" : "bg-gray-50/50"}`}>
-                  <td className="px-4 py-2.5">
-                    <div className="font-semibold text-gray-800">{e.varName}</div>
+                <tr key={i} className={`border-b ${
+                  e.isEdited ? "bg-sky-50 border-sky-200"
+                  : i % 2 === 0 ? "border-gray-100" : "bg-gray-50/40 border-gray-100"
+                }`}>
+                  {/* # */}
+                  <td className="px-3 py-2 text-center text-gray-300 font-mono text-[10px]">
+                    {e.isEdited ? <span className="text-sky-500 font-bold">✎</span> : i}
+                  </td>
+                  {/* Variável */}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <div className={`font-semibold ${e.isEdited ? "text-sky-900" : "text-gray-800"}`}>{e.varName}</div>
                     <div className="font-mono text-gray-400 text-[10px]">{e.varCode}</div>
                   </td>
-                  <td className="px-4 py-2.5 text-gray-500">{e.context || "—"}</td>
-                  <td className="px-4 py-2.5 font-mono text-gray-500">{fmtP(e.period)}</td>
-                  <td className="px-4 py-2.5 text-right font-mono text-gray-400">{fmt(e.before)}</td>
-                  <td className="px-4 py-2.5 text-right font-mono font-bold text-orange-700">{fmt(e.after)}</td>
+                  {/* Fórmula ids */}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {e.formula
+                      ? <code className="font-mono text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">{e.formula}</code>
+                      : <span className="text-gray-300">—</span>}
+                  </td>
+                  {/* Contexto */}
+                  <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{e.context || "—"}</td>
+                  {/* Período */}
+                  <td className="px-3 py-2 font-mono text-gray-500 whitespace-nowrap">{fmtP(e.period)}</td>
+                  {/* Anterior */}
+                  <td className="px-3 py-2 text-right font-mono text-gray-400 whitespace-nowrap">{fmt(e.before)}</td>
+                  {/* Novo */}
+                  <td className={`px-3 py-2 text-right font-mono font-bold whitespace-nowrap ${e.isEdited ? "text-sky-700" : "text-orange-700"}`}>
+                    {fmt(e.after)}
+                  </td>
+                  {/* Fórmula valores */}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {e.formulaValues
+                      ? <code className="font-mono text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">{e.formulaValues}</code>
+                      : <span className="text-gray-300">—</span>}
+                  </td>
+                  {/* Fórmula nomes */}
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {e.formulaNames
+                      ? <code className="font-mono text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded">{e.formulaNames}</code>
+                      : <span className="text-gray-300">—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1645,6 +1702,7 @@ function DeltaLogModal({ entries, onClose }) {
     </>
   )
 }
+
 
 export default function App(){
   const ctr = useRef(2)
@@ -1683,14 +1741,15 @@ export default function App(){
 
   // ── Carrega dados da API no arranque ──────────────────────
   useEffect(() => {
-    loadFromApi()
-      .then(data => {
-        setAllProjects(data.allProjects)
-        setActiveProjectId(data.allProjects[0]?.projectId ?? null)
-        applyProjectData(data)
+    // Carrega só a lista de projectos — não auto-selecciona
+    // O user escolhe o projecto no dropdown antes de ver os dados
+    loadProjectList()
+      .then(projects => {
+        setAllProjects(projects)
+        setLoading(false)
       })
       .catch(err => {
-        console.error("loadFromApi:", err)
+        console.error("loadProjectList:", err)
         setApiError(err.message)
         setLoading(false)
       })
@@ -1753,6 +1812,8 @@ export default function App(){
 
   // ── Filtros — painel 1 ────────────────────────────────
   const [filterScope1, setFilterScope1] = useState('')   // '' | 'template' | 'language' | 'lob'
+  // Filtro de variáveis afectadas — activado automaticamente após cada cálculo
+  const [filterAffected1, setFilterAffected1] = useState(false)
   const [filterType1,  setFilterType1]  = useState('')   // '' | 'input' | 'calculated'
   const [filterLang1,  setFilterLang1]  = useState('')
   const [filterLob1,   setFilterLob1]   = useState('')
@@ -1854,12 +1915,25 @@ export default function App(){
   // ── Version handlers ──────────────────────────────────────
   const activeVersion  = versions.find(v=>v.id===activeVerId)
   const activeColorIdx = versions.findIndex(v=>v.id===activeVerId)
-  const handleSelectVersion = verId => {setActiveVerId(verId);setDirtyKeys(new Set())}
+  const handleSelectVersion = async verId => {
+    setActiveVerId(verId)
+    setDirtyKeys(new Set())
+    // Carrega células se ainda não estiverem em memória para esta versão
+    const hasVersionCells = Object.keys(cells).some(k => k.split("·")[1] === String(verId))
+    if (!hasVersionCells) {
+      try {
+        const resp = await api.get(`/versions/${verId}/cells`)
+        const mapped = apiCellsToProto(resp.cells, project, vars, verId)
+        setCells(prev => ({ ...prev, ...mapped }))
+      } catch (e) { console.error("Load version cells:", e) }
+    }
+  }
   // ── Undo — reverte a última edição ──────────────────────────
   const handleUndo = async () => {
     if (!undoStack.length) return
     const [entry, ...rest] = undoStack
     setUndoStack(rest)
+    setFilterAffected1(false)
     await handleCellChange(entry.vid, entry.lid, entry.bid,
                            entry.period, entry.prevValue, entry.verId)
   }
@@ -1878,6 +1952,7 @@ export default function App(){
 
   const handleAddVersion = async () => {
     if (cloning) return
+    if (!activeVerId) { alert("Nenhuma versão activa seleccionada."); return }
     const idx      = versions.length + 1
     const suggested = `Versão ${idx}`
     const name = window.prompt("Nome da nova versão:", suggested)
@@ -1892,6 +1967,7 @@ export default function App(){
         name: trimmed
       })
       const cellsResp = await api.get(`/versions/${newVer.versionId}/cells`)
+
       const newCells = apiCellsToProto(cellsResp.cells, project, vars, newVer.versionId)
       setVersions(prev => [...prev, { id: newVer.versionId, name: newVer.name, colorIdx: idx % VER_PALETTE.length }])
       setCells(prev => ({ ...prev, ...newCells }))
@@ -1943,40 +2019,186 @@ export default function App(){
         value:  val,
         source: "manual"
       })
-      // Aplica delta e constrói log com valores antes/depois
+      // Aplica delta e constrói log — a variável editada aparece primeiro
       const deltaKeys = new Set()
-      const newLog    = []
-      setCells(prev => {
-        const updated = { ...prev }
-        for (const cell of result.delta) {
-          const dv = vars.find(x => x._apiId === cell.variableId)
-          if (!dv) continue
-          const dlid = toLangId(cell.languageId)
-          const dbid = toLobId(cell.lobId)
-          const dk   = mk(project.id, verId, cell.year * 100 + cell.month, dv.id, dlid, dbid)
-          // Captura valor anterior antes de actualizar
-          const beforeVal = prev[dk]?.value ?? null
-          updated[dk] = { value: cell.value, status: cell.status, source: cell.source }
-          deltaKeys.add(dk)
-          // Constrói entrada do log
-          const lang    = project.languages.find(l => l.id === dlid)
-          const lob     = lang?.lobs.find(b => b.id === dbid)
-          const context = lang && lob ? `${lang.code} / ${lob.name}`
-                        : lang        ? lang.code
-                        : null
-          newLog.push({
-            varName: dv.name,
-            varCode: dv.id,
-            context,
-            period:  cell.year * 100 + cell.month,
-            before:  beforeVal,
-            after:   cell.value
-          })
+
+      // Constrói o log FORA do setCells updater para evitar duplicação
+      // em React Strict Mode (que chama updaters duas vezes)
+      const newLog = [{
+        varName:  v.name,
+        varCode:  v.id,
+        context:  ctx,
+        period,
+        before:   prevValue,
+        after:    val,
+        formula:  null,
+        isEdited: true
+      }]
+
+      // Snapshot do estado actual para capturar "before" de cada célula do delta
+      const cellsSnapshot = cells
+      const cellUpdates   = {}
+
+      for (const cell of result.delta) {
+        const dv = vars.find(x => x._apiId === cell.variableId)
+        if (!dv) continue
+        const dlid = toLangId(cell.languageId)
+        const dbid = toLobId(cell.lobId)
+        const dk   = mk(project.id, verId, cell.year * 100 + cell.month, dv.id, dlid, dbid)
+
+        // Captura before do snapshot (não do working dict que pode já ter mudado)
+        const beforeVal = cellsSnapshot[dk]?.value ?? null
+        cellUpdates[dk] = { value: cell.value, status: cell.status, source: cell.source }
+        deltaKeys.add(dk)
+
+        const lang    = project.languages.find(l => l.id === dlid)
+        const lob     = lang?.lobs.find(b => b.id === dbid)
+        const context = lang && lob ? `${lang.code} / ${lob.name}`
+                      : lang        ? lang.code
+                      : null
+        const activeFormula = cell.formulaId
+          ? dv.alternatives?.find(a => a._formulaId === cell.formulaId)?.formula ?? dv.formula
+          : dv.formula
+
+        newLog.push({
+          varName: dv.name,
+          varCode: dv.id,
+          context,
+          period:  cell.year * 100 + cell.month,
+          before:  beforeVal,
+          after:   cell.value,
+          formula: activeFormula ?? null
+        })
+      }
+
+      // Estado final após todos os cálculos — usado para resolver valores nas fórmulas
+      const finalCells = { ...cellsSnapshot, ...cellUpdates }
+
+      // Enriquece cada entrada com a fórmula substituída por valores e por nomes
+      // Helper: formata número sem separador de milhares (mais legível em fórmulas)
+      const fmtVal = v => v == null ? null
+        : Number.isInteger(v) ? v.toString()
+        : Number(v).toLocaleString('pt-PT', { maximumFractionDigits: 4, useGrouping: false })
+
+      const resolveFormula = (formula, entryContext, entryPeriod) => {
+        if (!formula) return { withValues: null, withNames: null }
+
+        // Identifica lang/lob do contexto da entrada
+        const parts    = (entryContext || '').split(' / ')
+        const entryLang = project.languages.find(l => l.code === parts[0])
+        const entryLob  = entryLang?.lobs.find(b => b.name === parts[1] || b.code === parts[1])
+
+        // Lookup scope-aware: usa o scope declarado da variável para encontrar a chave certa
+        const lookupVal = (code, period) => {
+          const dv = vars.find(x => x.id === code)
+          if (!dv) return null
+          // Determina langId/lobId com base no scope da variável
+          let langId = entryLang?.id
+          let lobId  = entryLob?.id
+          if      (dv.scope === 'project') { langId = undefined; lobId = undefined }
+          else if (dv.scope === 'language') { lobId  = undefined }
+          // lob scope → usa contexto da entrada (langId + lobId)
+          const key = mk(project.id, verId, period, code, langId, lobId)
+          return finalCells[key]?.value ?? null
         }
-        return updated
-      })
-      setDeltaLog(newLog)
+
+        // Período anterior (para PREV)
+        const prevP = (() => {
+          const y = Math.floor(entryPeriod/100), m = entryPeriod%100
+          return m === 1 ? (y-1)*100+12 : y*100+(m-1)
+        })()
+
+        // Substitui PREV(v_xxx) primeiro, antes da substituição genérica
+        // ── Passo 1: substitui PREV(v_xxx) ──────────────────────
+        const applyPrev = str => str.replace(/PREV\(v_[a-z_0-9]+\)/g, match => {
+          const code = match.match(/v_[a-z_0-9]+/)[0]
+          const val  = lookupVal(code, prevP)
+          return val != null ? `PREV(${fmtVal(val)})` : match
+        })
+
+        // ── Passo 2: substitui referências qualificadas v_xxx[lang][lob] ──
+        // Deve ser feito ANTES da substituição genérica para evitar que
+        // v_rec[PT][ret] se torne 2100[PT][ret]
+        const applyQualified = (str, transform) =>
+          str.replace(/v_[a-z_0-9]+\[([^\]]+)\](?:\[([^\]]+)\])?/g, (match, langQ, lobQ) => {
+            const code    = match.match(/^v_[a-z_0-9]+/)[0]
+            const dv      = vars.find(x => x.id === code)
+            if (!dv) return match
+            // Resolve lang e lob do qualificador
+            const qLang   = langQ && langQ !== '*' ? project.languages.find(l => l.code === langQ) : entryLang
+            const qLob    = lobQ  && lobQ  !== '*' ? qLang?.lobs.find(b => b.code === lobQ || b.name === lobQ) : entryLob
+            return transform(code, qLang, qLob, match)
+          })
+
+        // ── Passo 3: substitui variáveis simples (sem qualificador) ───────
+        const applySimple = (str, transform) =>
+          str.replace(/v_[a-z_0-9]+/g, code => transform(code))
+
+        // Fórmula com valores: qualificadas primeiro, depois simples
+        let withValues = applyPrev(formula)
+        withValues = applyQualified(withValues, (code, qLang, qLob) => {
+          // Lookup com o contexto do qualificador
+          let langId = qLang?.id
+          let lobId  = qLob?.id
+          const dv = vars.find(x => x.id === code)
+          if (dv?.scope === 'project')  { langId = undefined; lobId = undefined }
+          else if (dv?.scope === 'language') { lobId = undefined }
+          const key = mk(project.id, verId, entryPeriod, code, langId, lobId)
+          const val = finalCells[key]?.value ?? null
+          return val != null ? fmtVal(val) : code
+        })
+        withValues = applySimple(withValues, code => {
+          const val = lookupVal(code, entryPeriod)
+          return val != null ? fmtVal(val) : code
+        })
+
+        // Fórmula com nomes: qualificadas primeiro (preserva qualificadores), depois simples
+        let withNames = applyQualified(formula, (code, qLang, qLob, original) => {
+          const dv = vars.find(x => x.id === code)
+          if (!dv) return original
+          // Reconstrói com o nome mas mantém qualificadores para clareza
+          const langPart = qLang ? `[${qLang.code}]` : ''
+          const lobPart  = qLob  ? `[${qLob.name}]`  : ''
+          return `${dv.name}${langPart}${lobPart}`
+        })
+        withNames = applySimple(withNames, code => {
+          const dv = vars.find(x => x.id === code)
+          return dv ? dv.name : code
+        })
+
+        return { withValues, withNames }
+      }
+
+      // Acrescenta as colunas de fórmula com valores e nomes a cada entrada.
+      // Isolado em try/catch próprio — um erro aqui não deve impedir o log de ser mostrado.
+      try {
+        for (const e of newLog) {
+          if (!e.isEdited && e.formula) {
+            const { withValues, withNames } = resolveFormula(e.formula, e.context, e.period)
+            e.formulaValues = withValues
+            e.formulaNames  = withNames
+          }
+        }
+      } catch (fmtErr) {
+        console.warn("resolveFormula:", fmtErr)
+      }
+
+      // Aplica todas as actualizações de uma vez — sem side effects no updater
+      setCells(prev => ({ ...prev, ...cellUpdates }))
+      // Mantém a ordem original do motor (ordem de cálculo).
+      // Filtra apenas entradas sem alteração real (Anterior = Novo) — são ruído.
+      // A variável editada pelo user é sempre mostrada (isEdited).
+      const filteredLog = newLog.filter(e =>
+        e.isEdited ||
+        e.before !== e.after ||
+        (e.before == null && e.after != null) ||
+        (e.before != null && e.after == null)
+      )
+
+      setDeltaLog(filteredLog)
       setDirtyKeys(prev => new Set([...prev, ...deltaKeys]))
+      // Activa automaticamente o filtro de afectadas após o cálculo
+      if (filteredLog.length > 1) setFilterAffected1(true)
     } catch (err) {
       console.error("EditCell:", err)
       // Reverte optimistic update
@@ -1993,7 +2215,9 @@ export default function App(){
   // ── Filter helper ─────────────────────────────────────
   const isInput  = v => !v.formula && !v.alternatives?.length
 
-  const applyFilters = (allRows, fScope, fType, fLang, fLob, fVar) => allRows.filter(({v, lid, bid}) => {
+  const applyFilters = (allRows, fScope, fType, fLang, fLob, fVar, affectedIds) => allRows.filter(({v, lid, bid}) => {
+    // Filtro de afectadas — tem precedência sobre todos os outros
+    if (affectedIds && !affectedIds.has(v.id)) return false
     // Filtro por âmbito (scope)
     if (fScope && v.scope !== fScope) return false
     // Filtro por tipo (input vs calculada)
@@ -2026,10 +2250,10 @@ export default function App(){
   const periods = visiblePeriods
 
   // Ordena por âmbito: template → language → lob
-  const SCOPE_PRIO = { template: 0, language: 1, lob: 2 }
+  const SCOPE_PRIO = { project: 0, language: 1, lob: 2 }
   const sortedVars = [...vars].sort((a, b) => SCOPE_PRIO[a.scope] - SCOPE_PRIO[b.scope])
   const rows = sortedVars.flatMap(v=>{
-    if(v.scope==="template")return[{v,lid:undefined,bid:undefined,ctx:"—"}]
+    if(v.scope==="project")return[{v,lid:undefined,bid:undefined,ctx:"—"}]
     if(v.scope==="language")return project.languages.map(l=>({v,lid:l.id,bid:undefined,ctx:`${l.code} — ${l.name}`}))
     return project.languages.flatMap(l=>l.lobs.map(b=>({v,lid:l.id,bid:b.id,ctx:`${l.code} / ${b.name}`})))
   })
@@ -2041,7 +2265,7 @@ export default function App(){
   }
 
   const dirtyByScope = useMemo(()=>{
-    const g={lob:[],language:[],template:[]}
+    const g={lob:[],language:[],project:[]}
     for(const vid of dirtyVarIds){const v=vars.find(x=>x.id===vid);if(v&&!g[v.scope].includes(vid))g[v.scope].push(vid)}
     return g
   },[dirtyVarIds,vars])
@@ -2070,8 +2294,11 @@ export default function App(){
   )
 
   // ── Computed filtered rows ──────────────────────────────
-  const rows1 = applyFilters(rows, filterScope1, filterType1, filterLang1, filterLob1, filterVar1)
-  const rows2 = applyFilters(rows, filterScope2, filterType2, filterLang2, filterLob2, filterVar2)
+  const affectedVarIds1 = filterAffected1 && deltaLog.length
+    ? new Set(deltaLog.map(e => e.varCode))
+    : null
+  const rows1 = applyFilters(rows, filterScope1, filterType1, filterLang1, filterLob1, filterVar1, affectedVarIds1)
+  const rows2 = applyFilters(rows, filterScope2, filterType2, filterLang2, filterLob2, filterVar2, null)
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
@@ -2098,20 +2325,8 @@ export default function App(){
             <span className="text-white text-xs font-bold">∑</span>
           </div>
           <div className="flex flex-col gap-0.5">
-            {/* Selector de projecto */}
-            {allProjects.length > 1 ? (
-              <select
-                value={activeProjectId ?? ''}
-                onChange={e => handleSelectProject(parseInt(e.target.value))}
-                className="text-sm font-bold text-gray-900 bg-transparent border-none outline-none cursor-pointer pr-5 leading-none max-w-48 truncate">
-                {allProjects.map(p => (
-                  <option key={p.projectId} value={p.projectId}>{p.name}</option>
-                ))}
-              </select>
-            ) : (
-              <h1 className="text-sm font-bold text-gray-900 leading-none">{project.name}</h1>
-            )}
-            <p className="text-xs text-gray-400">{template.name}</p>
+            <h1 className="text-sm font-bold text-gray-900 leading-none">Motor de Cálculo</h1>
+            <p className="text-xs text-gray-400">Gestão de Versões</p>
           </div>
         </div>
 
@@ -2128,9 +2343,28 @@ export default function App(){
         </div>
 
         {activeTest&&<div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 border border-green-200 rounded-xl text-xs text-green-700 max-w-xs shrink-0"><span className="w-2 h-2 rounded-full bg-green-500 shrink-0 animate-pulse"/><span className="truncate">{activeTest.desc}</span><button onClick={()=>handleSelectTest(null)} className="text-green-500 hover:text-green-700 font-bold ml-1 shrink-0">×</button></div>}
-        {hasDirty&&<div className="flex items-center gap-2 px-3 py-1.5 bg-orange-50 border border-orange-200 rounded-xl shrink-0"><span className="w-2 h-2 rounded-full bg-orange-400"/><span className="text-xs text-orange-700 font-medium">{dirtyVarIds.size} afectada{dirtyVarIds.size!==1?"s":""}</span><button onClick={()=>setDirtyKeys(new Set())} className="text-orange-500 hover:text-orange-700 text-xs font-bold ml-1">×</button></div>}
+        {hasDirty&&<div className="flex items-center gap-2 px-3 py-1.5 bg-orange-50 border border-orange-200 rounded-xl shrink-0"><span className="w-2 h-2 rounded-full bg-orange-400"/><span className="text-xs text-orange-700 font-medium">{dirtyVarIds.size} var. modificada{dirtyVarIds.size!==1?"s":""}</span><button onClick={()=>setDirtyKeys(new Set())} className="text-orange-500 hover:text-orange-700 text-xs font-bold ml-1">×</button></div>}
 
         <div className="flex-1"/>
+        {/* ── Selector de projecto ── */}
+        <div className="flex items-center gap-2 border-r border-gray-200 pr-4 shrink-0">
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide shrink-0">Projecto</label>
+          <div className="relative">
+            <select
+              value={activeProjectId ?? ''}
+              onChange={e => e.target.value && handleSelectProject(parseInt(e.target.value))}
+              className={`pl-3 pr-8 py-1.5 text-sm border rounded-xl bg-white outline-none focus:border-sky-400 appearance-none cursor-pointer min-w-44
+                ${!activeProjectId ? "border-orange-300 text-orange-500 font-semibold" : "border-gray-300 text-gray-800"}`}>
+              <option value="">— seleciona —</option>
+              {allProjects.map(p => (
+                <option key={p.projectId} value={p.projectId}>{p.name}</option>
+              ))}
+            </select>
+            <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
+          </div>
+        </div>
+
+        {/* ── Âmbito legend ── */}
         <div className="flex items-center gap-2 border-r border-gray-200 pr-4 shrink-0">
           {Object.entries(SC).map(([k,v])=>(<span key={k} className={`text-xs px-2.5 py-1 rounded-full font-medium ${v.badge}`}>{v.label}</span>))}
         </div>
@@ -2161,131 +2395,184 @@ export default function App(){
       {/* ════ Panel 1 ════ */}
       <div className={`flex flex-col overflow-hidden ${dualPanel?"w-1/2 border-r-2 border-gray-300":"flex-1"}`}>
 
-      {/* ── Version bar ── */}
-      <div className="bg-white border-b border-gray-200 px-5 flex items-center overflow-x-auto shrink-0">
-        {versions.map((ver,idx)=>(
-          <VersionTab key={ver.id} ver={ver} colorIdx={ver.colorIdx??idx} isActive={ver.id===activeVerId}
-            onSelect={handleSelectVersion} onClone={handleAddVersion}
-            onRename={name=>handleRenameVersion(ver.id,name)}
-            onDelete={()=>handleDeleteVersion(ver.id)} canDelete={versions.length>1}/>
-        ))}
-        <button onClick={handleAddVersion} disabled={cloning}
-          className="flex items-center gap-1.5 px-3 py-2.5 text-gray-400 hover:text-gray-600 text-xs font-medium transition-colors whitespace-nowrap border-b-2 border-transparent hover:border-gray-200 ml-1 disabled:opacity-50 disabled:cursor-not-allowed">
-          {cloning ? <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin inline-block"/> : null}
-          {cloning ? "A criar..." : "+ Nova versão"}
-        </button>
-        <div className="flex-1"/>
-        <button onClick={handleToggleCompare}
-          className={`flex items-center gap-1.5 px-3.5 py-2 mx-2 text-xs font-semibold rounded-xl border transition-all shrink-0
-            ${compareMode?"bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700":"bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}>
-          <span>⇄</span> Comparar versões
-        </button>
-      </div>
-
-      {/* ── Comparison toolbar ── */}
-      {compareMode&&(
-        <div className="bg-indigo-50 border-b border-indigo-100 px-5 py-2.5 flex items-center gap-4 shrink-0">
-          <span className="text-xs font-semibold text-indigo-500 uppercase tracking-wide shrink-0">Versões</span>
-          <VersionMultiSelect versions={versions} selectedIds={compareIds} onToggle={handleToggleVersion} onClear={()=>setCompareIds([])}/>
-          {orderedCV.length>=1&&(
-            <div className="flex items-center gap-1.5 text-xs text-indigo-600 bg-white px-3 py-1.5 rounded-lg border border-indigo-200">
-              {orderedCV.map((ver,i)=>{const col=verColor(ver.colorIdx??versions.findIndex(v=>v.id===ver.id));return(<span key={ver.id} className="flex items-center gap-1">{i>0&&<span className="text-indigo-200 mx-0.5">·</span>}<span className={`w-2 h-2 rounded-full ${col.dot}`}/><span className="font-medium">{ver.name}</span></span>)})}
-              {showDelta&&<span className="flex items-center gap-1 ml-1 pl-2 border-l border-indigo-200"><span className="text-indigo-400 font-mono font-bold">Δ</span><span className="text-indigo-400">{orderedCV[orderedCV.length-1].name} − {orderedCV[0].name}</span></span>}
-            </div>
-          )}
-          {orderedCV.length===0&&<span className="text-xs text-indigo-400 italic">Selecciona pelo menos uma versão</span>}
-          <div className="flex-1"/>
-          <button onClick={()=>setCompareMode(false)} className="text-indigo-400 hover:text-indigo-600 text-xs font-semibold shrink-0">Fechar ×</button>
+        {/* Placeholder: só aparece quando não há projecto seleccionado */}
+        {/* ── Placeholder quando não há projecto seleccionado ── */}
+      {!activeProjectId && !loading && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-gray-400">
+          <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-8 h-8 text-gray-300">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
+            </svg>
+          </div>
+          <div className="text-center">
+            <p className="font-semibold text-gray-600 text-base">Selecciona um projecto</p>
+            <p className="text-sm text-gray-400 mt-1">Escolhe um projecto no dropdown acima para ver os dados</p>
+          </div>
         </div>
       )}
 
-      {/* ── Filtros Painel 1 ── */}
-      <GridFilters project={project}
-        filterScope={filterScope1} setFilterScope={setFilterScope1}
-        filterType={filterType1}   setFilterType={setFilterType1}
-        filterLang={filterLang1}   setFilterLang={setFilterLang1}
-        filterLob={filterLob1}     setFilterLob={setFilterLob1}
-        filterVar={filterVar1}     setFilterVar={setFilterVar1}/>
+        {/* Conteúdo do painel: só aparece com projecto seleccionado */}
+        {activeProjectId && (
+          <div className="flex flex-col flex-1 overflow-hidden">
+      {/* ── Version bar ── */}
+            <div className="bg-white border-b border-gray-200 px-5 flex items-center overflow-x-auto shrink-0">
+              {versions.map((ver,idx)=>(
+                <VersionTab key={ver.id} ver={ver} colorIdx={ver.colorIdx??idx} isActive={ver.id===activeVerId}
+                  onSelect={handleSelectVersion} onClone={handleAddVersion}
+                  onRename={name=>handleRenameVersion(ver.id,name)}
+                  onDelete={()=>handleDeleteVersion(ver.id)} canDelete={versions.length>1}/>
+              ))}
+              <button onClick={handleAddVersion} disabled={cloning}
+                className="flex items-center gap-1.5 px-3 py-2.5 text-gray-400 hover:text-gray-600 text-xs font-medium transition-colors whitespace-nowrap border-b-2 border-transparent hover:border-gray-200 ml-1 disabled:opacity-50 disabled:cursor-not-allowed">
+                {cloning ? <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin inline-block"/> : null}
+                {cloning ? "A criar..." : "+ Nova versão"}
+              </button>
+              <div className="flex-1"/>
+              <button onClick={handleToggleCompare}
+                className={`flex items-center gap-1.5 px-3.5 py-2 mx-2 text-xs font-semibold rounded-xl border transition-all shrink-0
+                  ${compareMode?"bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700":"bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}>
+                <span>⇄</span> Comparar versões
+              </button>
+            </div>
 
-      {/* ── Grid Painel 1 ── */}
-      <div className="flex-1 overflow-auto">
-        <table className="border-collapse text-sm w-full">
-          <thead>
-            {!canCompare&&(
-              <tr className="bg-white border-b-2 border-gray-200 sticky top-0 z-10 shadow-sm">
-                <th className="text-left px-4 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-52">Variável</th>
-                <th className="text-left px-3 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-24">Âmbito</th>
-                <th className="text-left px-3 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-32 border-r border-gray-200">Contexto</th>
-                {periods.map(p=>(<th key={p} className="px-3 py-3 text-center font-semibold text-gray-600 text-xs uppercase tracking-wide min-w-32 border-l border-gray-100">{fmtP(p)}</th>))}
-              </tr>
+            {/* ── Comparison toolbar ── */}
+            {activeProjectId && compareMode&&(
+              <div className="bg-indigo-50 border-b border-indigo-100 px-5 py-2.5 flex items-center gap-4 shrink-0">
+                <span className="text-xs font-semibold text-indigo-500 uppercase tracking-wide shrink-0">Versões</span>
+                <VersionMultiSelect versions={versions} selectedIds={compareIds} onToggle={handleToggleVersion} onClear={()=>setCompareIds([])}/>
+                {orderedCV.length>=1&&(
+                  <div className="flex items-center gap-1.5 text-xs text-indigo-600 bg-white px-3 py-1.5 rounded-lg border border-indigo-200">
+                    {orderedCV.map((ver,i)=>{const col=verColor(ver.colorIdx??versions.findIndex(v=>v.id===ver.id));return(<span key={ver.id} className="flex items-center gap-1">{i>0&&<span className="text-indigo-200 mx-0.5">·</span>}<span className={`w-2 h-2 rounded-full ${col.dot}`}/><span className="font-medium">{ver.name}</span></span>)})}
+                    {showDelta&&<span className="flex items-center gap-1 ml-1 pl-2 border-l border-indigo-200"><span className="text-indigo-400 font-mono font-bold">Δ</span><span className="text-indigo-400">{orderedCV[orderedCV.length-1].name} − {orderedCV[0].name}</span></span>}
+                  </div>
+                )}
+                {orderedCV.length===0&&<span className="text-xs text-indigo-400 italic">Selecciona pelo menos uma versão</span>}
+                <div className="flex-1"/>
+                <button onClick={()=>setCompareMode(false)} className="text-indigo-400 hover:text-indigo-600 text-xs font-semibold shrink-0">Fechar ×</button>
+              </div>
             )}
-            {canCompare&&(<>
-              <tr className="bg-white border-b border-gray-100 sticky top-0 z-10">
-                <th rowSpan={2} className="text-left px-4 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-52 border-b-2 border-gray-200 align-bottom bg-white">Variável</th>
-                <th rowSpan={2} className="text-left px-3 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-24 border-b-2 border-gray-200 align-bottom bg-white">Âmbito</th>
-                <th rowSpan={2} className="text-left px-3 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-32 border-r border-gray-200 border-b-2 align-bottom bg-white">Contexto</th>
-                {periods.map(p=>(<th key={p} colSpan={colsPerPeriod} className="px-2 py-2 text-center font-bold text-gray-700 text-xs uppercase tracking-wide border-l-2 border-gray-300 bg-gray-50">{fmtP(p)}</th>))}
-              </tr>
-              <tr className="bg-white border-b-2 border-gray-200 sticky top-[37px] z-10 shadow-sm">
-                {periods.flatMap(p=>orderedCV.map((ver,vi)=>{const col=verColor(ver.colorIdx??versions.findIndex(v=>v.id===ver.id));return(<th key={`${p}-${ver.id}`} className={`px-2 py-1.5 text-center min-w-24 ${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"}`}><span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${col.active}`}><span className={`w-1.5 h-1.5 rounded-full ${col.dot}`}/>{ver.name}</span></th>)}).concat(showDelta?[<th key={`${p}-d`} className="px-2 py-1.5 text-center min-w-20 border-l border-indigo-200 bg-indigo-50/60 text-xs font-bold text-indigo-400">Δ</th>]:[]))}
-              </tr>
-            </>)}
-          </thead>
-          <tbody>
-            {rows1.map((row,idx)=>{
-              const{v,lid,bid,ctx}=row
-              const prev=rows[idx-1];const isFirst=!prev||prev.v.id!==v.id
-              const sc=SC[v.scope];const inp=isInput(v)
-              const varDirty=isVarDirty(v.id);const varTarget=isTarget(v.id)
-              const seqNum=updateOrder[v.id];const rowBg=varTarget?"bg-green-50/60":inp?"bg-cyan-50/40":sc.bg
-              return(
-                <tr key={`${v.id}-${lid}-${bid}`} className={`border-b transition-colors ${rowBg} ${isFirst?"border-t-2 border-t-gray-200":"border-gray-100"}`}>
-                  <td className="px-4 py-2 align-top">
-                    {isFirst&&(<div className="relative pr-5">
-                      <OrderBadge n={seqNum}/>
-                      <div className="flex items-center gap-1.5 group">
-                        <span className={`font-semibold text-sm transition-colors ${varDirty?"text-orange-700":varTarget?"text-green-700":"text-gray-800"}`}>{v.name}</span>
-                        {varTarget&&!varDirty&&<span className="text-green-500 text-xs animate-pulse">●</span>}
-                        {varDirty&&<span className="text-orange-400 text-xs">●</span>}
-                        <button onClick={()=>setModal(v)} className="text-gray-300 hover:text-sky-500 opacity-0 group-hover:opacity-100 text-xs transition-all">✎</button>
-                      </div>
-                      <div className={`text-xs font-mono mt-0.5 ${varDirty?"text-orange-500":varTarget?"text-green-600":"text-gray-400"}`}>{v.id}</div>
-                      {!inp&&!v.alternatives?.length&&v.formula&&<div className="text-xs text-gray-400 font-mono mt-0.5 max-w-44 truncate" title={v.formula}>{v.formula}</div>}
-                      {!inp&&v.alternatives?.length>0&&<div className="text-xs text-violet-500 mt-0.5 font-medium">{v.alternatives.length} alternativa{v.alternatives.length>1?"s":""}</div>}
-                      {varTarget&&inp&&<div className="text-xs text-green-600 font-semibold mt-0.5">← edita este valor</div>}
-                    </div>)}
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    {isFirst&&<div className="flex flex-col gap-1"><Badge scope={v.scope}/>{inp&&<span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-100 text-cyan-700 font-semibold w-fit">✎ input</span>}</div>}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-gray-500 border-r border-gray-200 align-middle">{ctx}</td>
-                  {!canCompare&&periods.map(period=>{
-                    const key=mk(project.id,activeVerId,period,v.id,lid,bid);const cs=cells[key]
-                    const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period)
-                    const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
-                    const dirty=isDirtyCell(v.id,lid,bid,period);const toEdit=varTarget&&inp
-                    return(<td key={period} className="border-l border-gray-100 p-0">{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
+
+            {/* ── Filtros Painel 1 ── */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <GridFilters project={project}
+                filterScope={filterScope1} setFilterScope={setFilterScope1}
+                filterType={filterType1}   setFilterType={setFilterType1}
+                filterLang={filterLang1}   setFilterLang={setFilterLang1}
+                filterLob={filterLob1}     setFilterLob={setFilterLob1}
+                filterVar={filterVar1}     setFilterVar={setFilterVar1}/>
+              {/* Pill de variáveis afectadas */}
+              {deltaLog.length > 0 && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {!filterAffected1 ? (
+                    <button onClick={()=>setFilterAffected1(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold
+                                 bg-orange-50 border border-orange-200 text-orange-600
+                                 hover:bg-orange-100 transition-colors">
+                      <span className="w-2 h-2 rounded-full bg-orange-400"/>
+                      {new Set(deltaLog.map(e=>e.varCode)).size} afectadas
+                      <span className="text-orange-400 font-normal">Ver só estas</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold
+                                    bg-orange-500 text-white border border-orange-500">
+                      <span className="w-2 h-2 rounded-full bg-white/80"/>
+                      {new Set(deltaLog.map(e=>e.varCode)).size} afectadas
+                      <button onClick={()=>setFilterAffected1(false)}
+                        className="ml-1 hover:text-orange-200 font-bold">×</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── Grid Painel 1 ── */}
+            <div className="flex-1 overflow-auto">
+              <table className="border-collapse text-sm w-full">
+                <thead>
+                  {!canCompare&&(
+                    <tr className="bg-white border-b-2 border-gray-200 sticky top-0 z-10 shadow-sm">
+                      <th className="text-left px-4 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-52">Variável</th>
+                      <th className="text-left px-3 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-24">Âmbito</th>
+                      <th className="text-left px-3 py-3 font-semibold text-gray-500 text-xs uppercase tracking-wide w-32 border-r border-gray-200">Contexto</th>
+                      {periods.map(p=>(<th key={p} className="px-3 py-3 text-center font-semibold text-gray-600 text-xs uppercase tracking-wide min-w-32 border-l border-gray-100">{fmtP(p)}</th>))}
+                    </tr>
+                  )}
+                  {canCompare&&(<>
+                    <tr className="bg-white border-b border-gray-100 sticky top-0 z-10">
+                      <th rowSpan={2} className="text-left px-4 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-52 border-b-2 border-gray-200 align-bottom bg-white">Variável</th>
+                      <th rowSpan={2} className="text-left px-3 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-24 border-b-2 border-gray-200 align-bottom bg-white">Âmbito</th>
+                      <th rowSpan={2} className="text-left px-3 py-2.5 font-semibold text-gray-500 text-xs uppercase tracking-wide w-32 border-r border-gray-200 border-b-2 align-bottom bg-white">Contexto</th>
+                      {periods.map(p=>(<th key={p} colSpan={colsPerPeriod} className="px-2 py-2 text-center font-bold text-gray-700 text-xs uppercase tracking-wide border-l-2 border-gray-300 bg-gray-50">{fmtP(p)}</th>))}
+                    </tr>
+                    <tr className="bg-white border-b-2 border-gray-200 sticky top-[37px] z-10 shadow-sm">
+                      {periods.flatMap(p=>orderedCV.map((ver,vi)=>{const col=verColor(ver.colorIdx??versions.findIndex(v=>v.id===ver.id));return(<th key={`${p}-${ver.id}`} className={`px-2 py-1.5 text-center min-w-24 ${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"}`}><span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${col.active}`}><span className={`w-1.5 h-1.5 rounded-full ${col.dot}`}/>{ver.name}</span></th>)}).concat(showDelta?[<th key={`${p}-d`} className="px-2 py-1.5 text-center min-w-20 border-l border-indigo-200 bg-indigo-50/60 text-xs font-bold text-indigo-400">Δ</th>]:[]))}
+                    </tr>
+                  </>)}
+                </thead>
+                <tbody>
+                  {rows1.map((row,idx)=>{
+                    const{v,lid,bid,ctx}=row
+                    const prev=rows1[idx-1];const isFirst=!prev||prev.v.id!==v.id
+                    const next=rows1[idx+1];const isLast=!next||next.v.id!==v.id
+                    const sc=SC[v.scope];const inp=isInput(v)
+                    const varDirty=isVarDirty(v.id);const varTarget=isTarget(v.id)
+                    const seqNum=updateOrder[v.id];const rowBg=varTarget?"bg-green-50/60":inp?"bg-cyan-50/40":sc.bg
+                    const borderCls=isFirst&&isLast?"border-t-2 border-t-gray-300 border-b-2 border-b-gray-300"
+                                   :isFirst?"border-t-2 border-t-gray-300 border-b border-b-gray-100"
+                                   :isLast?"border-b-2 border-b-gray-300 border-t-0"
+                                   :"border-b border-b-gray-100"
+                    return(
+                      <tr key={`${v.id}-${lid}-${bid}`} className={`transition-colors ${rowBg} ${borderCls}`}>
+                        <td className="px-4 py-2 align-top">
+                          {isFirst&&(<div className="relative pr-5">
+                            <OrderBadge n={seqNum}/>
+                            <div className="flex items-center gap-1.5 group">
+                              <span className={`font-semibold text-sm transition-colors ${varDirty?"text-orange-700":varTarget?"text-green-700":"text-gray-800"}`}>{v.name}</span>
+                              {varTarget&&!varDirty&&<span className="text-green-500 text-xs animate-pulse">●</span>}
+                              {varDirty&&<span className="text-orange-400 text-xs">●</span>}
+                              <button onClick={()=>setModal(v)} className="text-gray-300 hover:text-sky-500 opacity-0 group-hover:opacity-100 text-xs transition-all">✎</button>
+                            </div>
+                            <div className={`text-xs font-mono mt-0.5 ${varDirty?"text-orange-500":varTarget?"text-green-600":"text-gray-400"}`}>{v.id}</div>
+                            {!inp&&!v.alternatives?.length&&v.formula&&<div className="text-xs text-gray-400 font-mono mt-0.5 max-w-44 truncate" title={v.formula}>{v.formula}</div>}
+                            {!inp&&v.alternatives?.length>0&&<div className="text-xs text-violet-500 mt-0.5 font-medium">{v.alternatives.length} alternativa{v.alternatives.length>1?"s":""}</div>}
+                            {varTarget&&inp&&<div className="text-xs text-green-600 font-semibold mt-0.5">← edita este valor</div>}
+                          </div>)}
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          {isFirst&&<div className="flex flex-col gap-1"><Badge scope={v.scope}/>{inp&&<span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-100 text-cyan-700 font-semibold w-fit">✎ input</span>}</div>}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-500 border-r border-gray-200 align-middle">{ctx}</td>
+                        {!canCompare&&periods.map(period=>{
+                          const key=mk(project.id,activeVerId,period,v.id,lid,bid);const cs=cells[key]
+
+                          const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period)
+                          const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
+                          const dirty=isDirtyCell(v.id,lid,bid,period);const toEdit=varTarget&&inp
+                          return(<td key={period} className="border-l border-gray-100 p-0">{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
+                        })}
+                        {canCompare&&periods.flatMap(period=>{
+                          const vCells=orderedCV.map((ver,vi)=>{
+                            const key=mk(project.id,ver.id,period,v.id,lid,bid);const cs=cells[key]
+                            const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period,ver.id)
+                            const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
+                            const dirty=isDirtyCell(v.id,lid,bid,period,ver.id);const toEdit=varTarget&&inp
+                            return(<td key={`${period}-${ver.id}`} className={`${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"} p-0`}>{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv,ver.id)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
+                          })
+                          if(!showDelta)return vCells
+                          const vA=cells[mk(project.id,orderedCV[0].id,period,v.id,lid,bid)]?.value
+                          const vB=cells[mk(project.id,orderedCV[orderedCV.length-1].id,period,v.id,lid,bid)]?.value
+                          return[...vCells,<td key={`${period}-delta`} className="border-l border-indigo-100 bg-indigo-50/30 p-0"><DeltaCell valueA={vA} valueB={vB}/></td>]
+                        })}
+                      </tr>
+                    )
                   })}
-                  {canCompare&&periods.flatMap(period=>{
-                    const vCells=orderedCV.map((ver,vi)=>{
-                      const key=mk(project.id,ver.id,period,v.id,lid,bid);const cs=cells[key]
-                      const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period,ver.id)
-                      const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
-                      const dirty=isDirtyCell(v.id,lid,bid,period,ver.id);const toEdit=varTarget&&inp
-                      return(<td key={`${period}-${ver.id}`} className={`${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"} p-0`}>{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv,ver.id)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
-                    })
-                    if(!showDelta)return vCells
-                    const vA=cells[mk(project.id,orderedCV[0].id,period,v.id,lid,bid)]?.value
-                    const vB=cells[mk(project.id,orderedCV[orderedCV.length-1].id,period,v.id,lid,bid)]?.value
-                    return[...vCells,<td key={`${period}-delta`} className="border-l border-indigo-100 bg-indigo-50/30 p-0"><DeltaCell valueA={vA} valueB={vB}/></td>]
-                  })}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+        )}
       </div>
-      </div>{/* end panel 1 */}
 
       {/* ════ Panel 2 ════ */}
       {dualPanel&&(
@@ -2331,9 +2618,14 @@ export default function App(){
                 {rows2.map((row,idx)=>{
                   const{v,lid,bid,ctx}=row
                   const prev=rows2[idx-1];const isFirst=!prev||prev.v.id!==v.id
+                  const next2=rows2[idx+1];const isLast2=!next2||next2.v.id!==v.id
                   const sc=SC[v.scope];const inp=isInput(v)
+                  const bCls2=isFirst&&isLast2?"border-t-2 border-t-gray-300 border-b-2 border-b-gray-300"
+                             :isFirst?"border-t-2 border-t-gray-300 border-b border-b-gray-100"
+                             :isLast2?"border-b-2 border-b-gray-300 border-t-0"
+                             :"border-b border-b-gray-100"
                   return(
-                    <tr key={`p2-${v.id}-${lid}-${bid}`} className={`border-b transition-colors ${sc.bg} ${isFirst?"border-t-2 border-t-gray-200":"border-gray-100"}`}>
+                    <tr key={`p2-${v.id}-${lid}-${bid}`} className={`transition-colors ${sc.bg} ${bCls2}`}>
                       <td className="px-4 py-2 align-top">
                         {isFirst&&(<div className="relative pr-5">
                           <div className="flex items-center gap-1.5">
@@ -2371,13 +2663,21 @@ export default function App(){
 
       </div>{/* end main panels */}
 
-      {/* ── Footer ── */}
+
       {(hasDirty || undoStack.length > 0)?(
         <footer className="bg-orange-50 border-t border-orange-200 px-5 py-2.5 flex items-center gap-3 text-xs shrink-0">
           <span className="w-2 h-2 rounded-full bg-orange-400 shrink-0"/>
-          <span className="text-orange-700 font-medium shrink-0">
-            {deltaLog.length} variável{deltaLog.length !== 1 ? "es" : ""} afectada{deltaLog.length !== 1 ? "s" : ""}
-          </span>
+          {(()=>{
+            const calcCount = new Set(deltaLog.filter(e=>!e.isEdited).map(e=>e.varCode)).size
+            return (
+              <span className="text-orange-700 font-medium shrink-0">
+                {calcCount} variável{calcCount !== 1 ? "es" : ""} calculada{calcCount !== 1 ? "s" : ""}
+                {deltaLog.some(e=>e.isEdited) && (
+                  <span className="text-gray-400 font-normal"> · 1 editada</span>
+                )}
+              </span>
+            )
+          })()}
           {deltaLog.length > 0 && (
             <button onClick={()=>setShowDeltaLog(true)}
               className="text-orange-600 hover:text-orange-800 underline font-medium shrink-0">
@@ -2403,7 +2703,7 @@ export default function App(){
           )}
 
           {/* Gravar — limpa o histórico de undo */}
-          <button onClick={()=>{setDirtyKeys(new Set());setDeltaLog([]);setShowDeltaLog(false);setUndoStack([])}}
+          <button onClick={()=>{setDirtyKeys(new Set());setDeltaLog([]);setShowDeltaLog(false);setUndoStack([]);setFilterAffected1(false)}}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl font-semibold transition-colors shrink-0">
             Gravar
           </button>

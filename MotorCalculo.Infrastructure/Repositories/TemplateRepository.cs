@@ -76,6 +76,7 @@ public sealed class ProjectRepository(MotorCalculoDbContext db) : IProjectReposi
 
     public async Task<IReadOnlyList<ProjectEntity>> GetAllAsync(CancellationToken ct = default)
         => await db.Projects.AsNoTracking()
+                             .Where(p => db.Versions.Any(v => v.ProjectId == p.ProjectId))
                              .OrderBy(p => p.Name)
                              .ToListAsync(ct);
 

@@ -10,7 +10,7 @@ public sealed record VariableDefinition
     public string Code          { get; init; } = "";
     public string Name          { get; init; } = "";
 
-    /// <summary>"lob" | "language" | "template"</summary>
+    /// <summary>"lob" | "language" | "project"</summary>
     public string ScopeCode     { get; init; } = "";
 
     public bool   IsInput       { get; init; }

@@ -28,7 +28,7 @@ public sealed record EvaluationContext(
     /// <summary>Mapa code → variableId para resolver referências nas fórmulas.</summary>
     IReadOnlyDictionary<string, int> VariableCodeToId,
 
-    /// <summary>Mapa variableId → scopeCode ("template"|"language"|"lob") para resolver cross-scope.</summary>
+    /// <summary>Mapa variableId → scopeCode ("project"|"language"|"lob") para resolver cross-scope.</summary>
     IReadOnlyDictionary<int, string> VariableIdToScope,
 
     /// <summary>Estado completo das células no momento da avaliação (actualizado durante a sessão).</summary>

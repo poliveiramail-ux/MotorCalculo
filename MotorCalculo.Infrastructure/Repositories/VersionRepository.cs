@@ -42,48 +42,55 @@ public sealed class VersionRepository(MotorCalculoDbContext db) : IVersionReposi
     public async Task<VersionEntity> CloneAsync(
         int fromVersionId, string code, string name, CancellationToken ct = default)
     {
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        try
-        {
-            var source = await db.Versions
-                .AsNoTracking()
-                .FirstOrDefaultAsync(v => v.VersionId == fromVersionId, ct)
-                ?? throw new InvalidOperationException(
-                    $"Versão de origem {fromVersionId} não encontrada.");
+        // SqlServerRetryingExecutionStrategy não suporta transacções manuais directas.
+        // É necessário envolver a transacção em CreateExecutionStrategy().ExecuteAsync().
+        var strategy = db.Database.CreateExecutionStrategy();
 
-            // 1 — Cria nova versão
-            var newVersion = new VersionEntity
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            try
             {
-                ProjectId    = source.ProjectId,
-                Code         = code,
-                Name         = name,
-                ClonedFromId = fromVersionId,
-                CreatedAt    = DateTime.UtcNow,
-            };
-            db.Versions.Add(newVersion);
-            await db.SaveChangesAsync(ct);
+                var source = await db.Versions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(v => v.VersionId == fromVersionId, ct)
+                    ?? throw new InvalidOperationException(
+                        $"Versão de origem {fromVersionId} não encontrada.");
 
-            // 2 — Copia células via SQL directo (mais eficiente que EF Core para bulk insert)
-            var sql = """
-                INSERT INTO dbo.CellValue
-                    (version_id, year, month, variable_id, language_id, lob_id,
-                     value, status, source, formula_id, imported_at, computed_at)
-                SELECT
-                    {0}, year, month, variable_id, language_id, lob_id,
-                    value, status, source, formula_id, imported_at, computed_at
-                FROM dbo.CellValue
-                WHERE version_id = {1}
-                """;
+                // 1 — Cria nova versão
+                var newVersion = new VersionEntity
+                {
+                    ProjectId    = source.ProjectId,
+                    Code         = code,
+                    Name         = name,
+                    ClonedFromId = fromVersionId,
+                    CreatedAt    = DateTime.UtcNow,
+                };
+                db.Versions.Add(newVersion);
+                await db.SaveChangesAsync(ct);
 
-            await db.Database.ExecuteSqlRawAsync(sql, newVersion.VersionId, fromVersionId, ct);
-            await tx.CommitAsync(ct);
+                // 2 — Copia células via SQL directo (mais eficiente que EF Core para bulk insert)
+                var sql = """
+                    INSERT INTO dbo.CellValue
+                        (version_id, year, month, variable_id, language_id, lob_id,
+                         value, status, source, formula_id, imported_at, computed_at)
+                    SELECT
+                        {0}, year, month, variable_id, language_id, lob_id,
+                        value, status, source, formula_id, imported_at, computed_at
+                    FROM dbo.CellValue
+                    WHERE version_id = {1}
+                    """;
 
-            return newVersion;
-        }
-        catch
-        {
-            await tx.RollbackAsync(ct);
-            throw;
-        }
+                await db.Database.ExecuteSqlRawAsync(sql, new object[] { newVersion.VersionId, fromVersionId }, ct);
+                await tx.CommitAsync(ct);
+
+                return newVersion;
+            }
+            catch
+            {
+                await tx.RollbackAsync(ct);
+                throw;
+            }
+        });
     }
 }
