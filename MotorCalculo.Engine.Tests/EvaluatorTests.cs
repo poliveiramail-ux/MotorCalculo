@@ -76,7 +76,7 @@ public class EvaluatorFixture
     };
 
     public EvaluationContext MakeCtx(int? langId = LangPt, int? lobId = LobRet) =>
-        new(VersionId, Year, Month, langId, lobId, Project, CodeToId, ScopeById, Cells);
+        new(VersionId, Year, Month, langId, lobId, Project, CodeToId, ScopeById, Cells, Cells);
 }
 
 public class EvaluatorTests(EvaluatorFixture fx) : IClassFixture<EvaluatorFixture>

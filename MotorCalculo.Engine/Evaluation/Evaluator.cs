@@ -20,8 +20,12 @@ public static class Evaluator
         AstNode node, EvaluationContext ctx) => node switch
     {
         LiteralNode  lit => (lit.Value, CellStatus.Ok),
-        VariableNode v   => EvalRef(v.Code, v.LangCode, v.LobCode, ctx, ctx.Year, ctx.Month, isPrev: false),
-        PrevNode     p   => EvalRef(p.Code, p.LangCode, p.LobCode, ctx, PrevYear(ctx.Year, ctx.Month), PrevMonth(ctx.Month), isPrev: true),
+        VariableNode  v  => EvalRef(v.Code, v.LangCode, v.LobCode, ctx, ctx.Year, ctx.Month, isPrev: false),
+        PrevNode      p  => EvalRef(p.Code, p.LangCode, p.LobCode, ctx, PrevYear(ctx.Year, ctx.Month), PrevMonth(ctx.Month), isPrev: true),
+        CountLobsNode _  => EvalCountLobs(ctx),
+        CountLangsNode _ => ((decimal)ctx.Project.Languages.Count, CellStatus.Ok),
+        WeightNode     w  => EvalWeight(w.Code, w.LangCode, ctx),
+        WeightLangNode wl => EvalWeightLang(wl.Code, ctx),
         SumLobsNode  sl  => EvalSumLobs(sl, ctx),
         SumLangsNode sg  => EvalSumLangs(sg, ctx),
         BinaryOpNode op  => EvalBinaryOp(op, ctx),
@@ -186,4 +190,97 @@ public static class Evaluator
 
     private static int PrevMonth(int month) => month == 1 ? 12 : month - 1;
     private static int PrevYear(int year, int month) => month == 1 ? year - 1 : year;
+
+    // ── COUNT_LOBS() ──────────────────────────────────────────
+    private static (decimal? Value, CellStatus Status) EvalCountLobs(EvaluationContext ctx)
+    {
+        var lang = ctx.Project.Languages.FirstOrDefault(l => l.LanguageId == ctx.LanguageId);
+        if (lang is null) return (null, CellStatus.Error);
+        return ((decimal)lang.Lobs.Count, CellStatus.Ok);
+    }
+
+    // ── WEIGHT(v_xxx) / WEIGHT(v_xxx)[*] ─────────────────────
+    // Peso relativo deste LOB face ao denominador.
+    // LangCode = null → denominador = todos os LOBs de todas as línguas
+    // LangCode = "*"  → denominador = LOBs da língua actual
+    // Lê do Snapshot para evitar circularidade.
+    private static (decimal? Value, CellStatus Status) EvalWeight(
+        string code, string? langCode, EvaluationContext ctx)
+    {
+        if (!ctx.VariableCodeToId.TryGetValue(code, out var varId))
+            return (null, CellStatus.Error);
+
+        var currentKey = new CellKey(ctx.VersionId, ctx.Year, ctx.Month,
+                                      varId, ctx.LanguageId, ctx.LobId);
+        if (!ctx.Snapshot.TryGetValue(currentKey, out var currentCell) ||
+            currentCell.Status != CellStatus.Ok || currentCell.Value is null)
+            return (null, CellStatus.Empty);
+
+        var numerator   = currentCell.Value.Value;
+        decimal denominator = 0m;
+
+        if (langCode is null)
+        {
+            // WEIGHT(v) — todos os LOBs de todas as línguas
+            foreach (var lang in ctx.Project.Languages)
+                foreach (var lob in lang.Lobs)
+                {
+                    var k = new CellKey(ctx.VersionId, ctx.Year, ctx.Month,
+                                        varId, lang.LanguageId, lob.LobId);
+                    if (ctx.Snapshot.TryGetValue(k, out var c) &&
+                        c.Status == CellStatus.Ok && c.Value.HasValue)
+                        denominator += c.Value.Value;
+                }
+        }
+        else // "*" — LOBs da língua actual
+        {
+            var curLang = ctx.Project.Languages
+                .FirstOrDefault(l => l.LanguageId == ctx.LanguageId);
+            if (curLang is not null)
+                foreach (var lob in curLang.Lobs)
+                {
+                    var k = new CellKey(ctx.VersionId, ctx.Year, ctx.Month,
+                                        varId, ctx.LanguageId, lob.LobId);
+                    if (ctx.Snapshot.TryGetValue(k, out var c) &&
+                        c.Status == CellStatus.Ok && c.Value.HasValue)
+                        denominator += c.Value.Value;
+                }
+        }
+
+        if (denominator == 0m) return (null, CellStatus.Error);
+        return (numerator / denominator, CellStatus.Ok);
+    }
+
+    // ── WEIGHT_LANG(v_xxx) ────────────────────────────────────
+    // Peso relativo da língua actual face a todas as línguas.
+    // Numerador:   v_xxx[língua actual, lob=null]
+    // Denominador: Σ v_xxx[todas as línguas, lob=null]
+    // Lê do Snapshot para evitar circularidade.
+    private static (decimal? Value, CellStatus Status) EvalWeightLang(
+        string code, EvaluationContext ctx)
+    {
+        if (!ctx.VariableCodeToId.TryGetValue(code, out var varId))
+            return (null, CellStatus.Error);
+
+        var currentKey = new CellKey(ctx.VersionId, ctx.Year, ctx.Month,
+                                      varId, ctx.LanguageId, null);
+        if (!ctx.Snapshot.TryGetValue(currentKey, out var currentCell) ||
+            currentCell.Status != CellStatus.Ok || currentCell.Value is null)
+            return (null, CellStatus.Empty);
+
+        var numerator   = currentCell.Value.Value;
+        decimal denominator = 0m;
+
+        foreach (var lang in ctx.Project.Languages)
+        {
+            var k = new CellKey(ctx.VersionId, ctx.Year, ctx.Month,
+                                 varId, lang.LanguageId, null);
+            if (ctx.Snapshot.TryGetValue(k, out var c) &&
+                c.Status == CellStatus.Ok && c.Value.HasValue)
+                denominator += c.Value.Value;
+        }
+
+        if (denominator == 0m) return (null, CellStatus.Error);
+        return (numerator / denominator, CellStatus.Ok);
+    }
 }

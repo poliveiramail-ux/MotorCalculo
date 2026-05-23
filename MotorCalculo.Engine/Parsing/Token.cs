@@ -15,8 +15,12 @@ public enum TokenType
 
     // Palavras-chave
     Prev,      // PREV(v_xxx) — período anterior
-    SumLobs,   // SUM_LOBS(v_xxx) — soma todos os LOBs da língua
-    SumLangs,  // SUM_LANGS(v_xxx) — soma todas as línguas
+    SumLobs,    // SUM_LOBS(v_xxx)   — soma todos os LOBs da língua
+    SumLangs,   // SUM_LANGS(v_xxx)  — soma todas as línguas
+    CountLobs,  // COUNT_LOBS()      — nº de LOBs da língua actual
+    CountLangs, // COUNT_LANGS()     — nº de línguas do projecto
+    Weight,     // WEIGHT(v_xxx) ou WEIGHT(v_xxx)[*] — peso LOB (anti-circular)
+    WeightLang, // WEIGHT_LANG(v_xxx)   — peso língua actual face a todas
 
     Eof
 }

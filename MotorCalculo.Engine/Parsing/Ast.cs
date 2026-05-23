@@ -41,6 +41,35 @@ public sealed record SumLangsNode(
     string? LobCode
 ) : AstNode;
 
+/// <summary>COUNT_LOBS() — número de LOBs da língua actual no projecto.</summary>
+public sealed record CountLobsNode : AstNode;
+
+/// <summary>COUNT_LANGS() — número de línguas do projecto.</summary>
+public sealed record CountLangsNode : AstNode;
+
+/// <summary>
+/// WEIGHT(v_xxx) ou WEIGHT(v_xxx)[*]
+/// Peso relativo deste LOB:
+///   LangCode = null → todos os LOBs de todas as línguas (denominador global)
+///   LangCode = "*"  → LOBs da língua actual (denominador por língua)
+/// Lê do snapshot para evitar circularidade.
+/// </summary>
+public sealed record WeightNode(
+    string  Code,
+    string? LangCode   // null=global, "*"=língua actual
+) : AstNode;
+
+/// <summary>
+/// WEIGHT_LANG(v_xxx)
+/// Peso relativo da língua actual face a todas as línguas.
+/// Numerador:   v_xxx[língua actual, lob=null]
+/// Denominador: Σ v_xxx[todas as línguas, lob=null]
+/// Lê do snapshot para evitar circularidade.
+/// </summary>
+public sealed record WeightLangNode(
+    string Code
+) : AstNode;
+
 /// <summary>Operação binária: +, -, *, /</summary>
 public sealed record BinaryOpNode(
     char    Op,

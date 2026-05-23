@@ -31,6 +31,12 @@ public sealed record EvaluationContext(
     /// <summary>Mapa variableId → scopeCode ("template"|"language"|"lob") para resolver cross-scope.</summary>
     IReadOnlyDictionary<int, string> VariableIdToScope,
 
-    /// <summary>Estado completo das células no momento da avaliação.</summary>
-    IReadOnlyDictionary<CellKey, CellValue> Cells
+    /// <summary>Estado completo das células no momento da avaliação (actualizado durante a sessão).</summary>
+    IReadOnlyDictionary<CellKey, CellValue> Cells,
+
+    /// <summary>
+    /// Snapshot das células no início da sessão (antes de qualquer cálculo desta iteração).
+    /// Usado por WEIGHT() para evitar circularidade — lê sempre os valores originais.
+    /// </summary>
+    IReadOnlyDictionary<CellKey, CellValue> Snapshot
 );

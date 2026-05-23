@@ -122,6 +122,55 @@ public sealed class Parser(List<Token> tokens)
             return new SumLangsNode(code, lang, lob);
         }
 
+        if (token.Type == TokenType.CountLobs)
+        {
+            Consume();
+            Expect(TokenType.LParen);
+            Expect(TokenType.RParen);
+            return new CountLobsNode();
+        }
+
+        if (token.Type == TokenType.CountLangs)
+        {
+            Consume();
+            Expect(TokenType.LParen);
+            Expect(TokenType.RParen);
+            return new CountLangsNode();
+        }
+
+        if (token.Type == TokenType.Weight)
+        {
+            // WEIGHT(v_xxx)    → peso global (todos os LOBs de todas as línguas)
+            // WEIGHT(v_xxx)[*] → peso relativo à língua actual
+            Consume();
+            Expect(TokenType.LParen);
+            var code = Expect(TokenType.Variable).Value!;
+            Expect(TokenType.RParen);
+            string? langCode = null;
+            if (Match(TokenType.LBracket))
+            {
+                Consume();                  // [
+                var spec = ParseQualSpec();
+                Expect(TokenType.RBracket); // ]
+                // Só aceita [*] — referência específica de língua foi removida
+                if (spec != "*")
+                    throw new ParseException(
+                        $"WEIGHT só suporta [*] como qualificador. Use WEIGHT_LANG para pesos de língua.");
+                langCode = "*";
+            }
+            return new WeightNode(code, langCode);
+        }
+
+        if (token.Type == TokenType.WeightLang)
+        {
+            // WEIGHT_LANG(v_xxx) — peso da língua actual face a todas as línguas
+            Consume();
+            Expect(TokenType.LParen);
+            var code = Expect(TokenType.Variable).Value!;
+            Expect(TokenType.RParen);
+            return new WeightLangNode(code);
+        }
+
         if (token.Type == TokenType.Variable)
         {
             Consume();

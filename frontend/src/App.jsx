@@ -158,7 +158,7 @@ function tokenize(s) {
   while (i < s.length) {
     if (/\s/.test(s[i])) { i++; continue }
     if (/\d/.test(s[i])) { let n = ""; while (i < s.length && /[\d.]/.test(s[i])) n += s[i++]; ts.push({ t: "NUM", v: +n }); continue }
-    if (/[a-zA-Z_]/.test(s[i])) { let w = ""; while (i < s.length && /\w/.test(s[i])) w += s[i++]; const kw = { PREV: "PREV", SUM_LOBS: "SL", SUM_LANGS: "SG" }; ts.push({ t: kw[w] ?? "VAR", v: w }); continue }
+    if (/[a-zA-Z_]/.test(s[i])) { let w = ""; while (i < s.length && /\w/.test(s[i])) w += s[i++]; const kw = { PREV: "PREV", SUM_LOBS: "SL", SUM_LANGS: "SG", COUNT_LOBS: "CL", COUNT_LANGS: "CG", WEIGHT: "WGT", WEIGHT_LANG: "WGL" }; ts.push({ t: kw[w] ?? "VAR", v: w }); continue }
     const ops = { "+": "+", "-": "-", "*": "*", "/": "/", "(": "(", ")": ")", "[": "[", "]": "]" }
     if (ops[s[i]]) { ts.push({ t: ops[s[i]] }); i++ } else throw new Error(`'${s[i]}'`)
   }
@@ -218,6 +218,25 @@ class Parser {
       const { lang, lob } = this.parseQualifiers()
       this.ex(")"); return { t: "SumG", id: v, lang, lob }
     }
+    if (tk.t === "CL") { this.eat(); this.ex("("); this.ex(")"); return { t: "CntL" } }
+    if (tk.t === "CG") { this.eat(); this.ex("("); this.ex(")"); return { t: "CntG" } }
+    if (tk.t === "WGT") {
+      this.eat(); this.ex("("); const wv = this.ex("VAR").v; this.ex(")")
+      // só aceita [*] como qualificador
+      let wlang = null
+      if (this.pk()?.t === "[") {
+        this.eat()
+        const spec = this.pk()?.v
+        this.eat(); this.ex("]")
+        if (spec !== "*") throw new Error("WEIGHT só suporta [*]. Use WEIGHT_LANG para pesos de língua.")
+        wlang = "*"
+      }
+      return { t: "Wgt", id: wv, lang: wlang }
+    }
+    if (tk.t === "WGL") {
+      this.eat(); this.ex("("); const wlv = this.ex("VAR").v; this.ex(")")
+      return { t: "WgtL", id: wlv }
+    }
     if (tk.t === "VAR") {
       this.eat()
       const { lang, lob } = this.parseQualifiers()
@@ -271,6 +290,8 @@ const getDeps = n => {
   if (n.t === "Prev") return [{ k: "pv", id: n.id }]
   if (n.t === "SumL") return [{ k: "sl", id: n.id }]
   if (n.t === "SumG") return [{ k: "sg", id: n.id }]
+  if (n.t === "Wgt")  return [{ k: "wt", id: n.id }]
+  if (n.t === "WgtL") return [{ k: "wl", id: n.id }]
   if (n.t === "Op")   return [...getDeps(n.l), ...getDeps(n.r)]
   return []
 }
@@ -355,6 +376,42 @@ const evalNode = (n, ctx, cs, cl) => {
       return cell === undefined ? 0 : cell.value
     }
 
+    case "CntL": {
+      const curLang = cl.languages.find(l => l.id === lid)
+      return curLang?.lobs?.length ?? 0
+    }
+    case "CntG": return cl.languages.length
+    case "Wgt": {
+      // WEIGHT(v_xxx) / WEIGHT(v_xxx)[*]
+      const num = cs[mk(cid, ver, period, n.id, lid, bid)]?.value ?? null
+      if (num === null) return 0
+      let denom = 0
+      if (!n.lang) {
+        for (const l of cl.languages)
+          for (const b of l.lobs) {
+            const c = cs[mk(cid, ver, period, n.id, l.id, b.id)]
+            if (c?.value != null) denom += c.value
+          }
+      } else { // "*"
+        const curL = cl.languages.find(l => l.id === lid)
+        if (curL) for (const b of curL.lobs) {
+          const c = cs[mk(cid, ver, period, n.id, lid, b.id)]
+          if (c?.value != null) denom += c.value
+        }
+      }
+      return denom === 0 ? null : num / denom
+    }
+    case "WgtL": {
+      // WEIGHT_LANG(v_xxx)
+      const numL = cs[mk(cid, ver, period, n.id, lid, undefined)]?.value ?? null
+      if (numL === null) return 0
+      let denomL = 0
+      for (const l of cl.languages) {
+        const c = cs[mk(cid, ver, period, n.id, l.id, undefined)]
+        if (c?.value != null) denomL += c.value
+      }
+      return denomL === 0 ? null : numL / denomL
+    }
     case "SumL": {
       // SumL itera os LOBs da língua resolvida (fixa ou relativa).
       const rLid = resLid(n.lang)
@@ -1533,6 +1590,62 @@ function PeriodRangeSelector({ rangeStart, rangeEnd, setRangeStart, setRangeEnd,
   )
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+   DELTA LOG MODAL — popup com detalhe das variáveis afectadas
+   ═══════════════════════════════════════════════════════════════ */
+function DeltaLogModal({ entries, onClose }) {
+  if (!entries.length) return null
+  const fmt = v => v == null ? "—" : Number(v).toLocaleString("pt-PT", { maximumFractionDigits: 4 })
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/30 z-50" onClick={onClose}/>
+      <div className="fixed bottom-14 left-1/2 -translate-x-1/2 z-50
+                      bg-white rounded-2xl shadow-2xl border border-gray-200
+                      w-full max-w-2xl max-h-96 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-orange-400"/>
+            <span className="font-bold text-gray-900 text-sm">
+              {entries.length} variável{entries.length !== 1 ? "es" : ""} afectada{entries.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">×</button>
+        </div>
+        {/* Table */}
+        <div className="overflow-auto flex-1">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Variável</th>
+                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Contexto</th>
+                <th className="text-left px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Período</th>
+                <th className="text-right px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide">Anterior</th>
+                <th className="text-right px-4 py-2.5 font-semibold text-gray-500 uppercase tracking-wide w-28">Novo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e, i) => (
+                <tr key={i} className={`border-b border-gray-100 ${i % 2 === 0 ? "" : "bg-gray-50/50"}`}>
+                  <td className="px-4 py-2.5">
+                    <div className="font-semibold text-gray-800">{e.varName}</div>
+                    <div className="font-mono text-gray-400 text-[10px]">{e.varCode}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-500">{e.context || "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-gray-500">{fmtP(e.period)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-gray-400">{fmt(e.before)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono font-bold text-orange-700">{fmt(e.after)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )
+}
+
 export default function App(){
   const ctr = useRef(2)
 
@@ -1627,6 +1740,14 @@ export default function App(){
   // ── Hamburger menu + dual panel ───────────────────────
   const [menuOpen,     setMenuOpen]     = useState(false)
   const [cloning,      setCloning]      = useState(false)  // loading state do botão Nova versão
+
+  // ── Delta log — detalhe das variáveis afectadas por interacção ──
+  const [deltaLog,     setDeltaLog]     = useState([])
+  const [showDeltaLog, setShowDeltaLog] = useState(false)
+
+  // ── Undo stack (máx 5 entradas) ──────────────────────────────
+  // Cada entrada: { vid, lid, bid, period, verId, prevValue, label }
+  const [undoStack, setUndoStack] = useState([])
   const [dualPanel,    setDualPanel]    = useState(false)
   const [panel2VerId,  setPanel2VerId]  = useState(null)
 
@@ -1734,6 +1855,27 @@ export default function App(){
   const activeVersion  = versions.find(v=>v.id===activeVerId)
   const activeColorIdx = versions.findIndex(v=>v.id===activeVerId)
   const handleSelectVersion = verId => {setActiveVerId(verId);setDirtyKeys(new Set())}
+  // ── Undo — reverte a última edição ──────────────────────────
+  const handleUndo = async () => {
+    if (!undoStack.length) return
+    const [entry, ...rest] = undoStack
+    setUndoStack(rest)
+    await handleCellChange(entry.vid, entry.lid, entry.bid,
+                           entry.period, entry.prevValue, entry.verId)
+  }
+
+  // Ctrl+Z → undo
+  useEffect(() => {
+    const onKey = e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undoStack])
+
   const handleAddVersion = async () => {
     if (cloning) return
     const idx      = versions.length + 1
@@ -1743,7 +1885,6 @@ export default function App(){
     const trimmed = name.trim() || suggested
     setCloning(true)
     const ts = Date.now().toString(36).slice(-4)
-    console.log("[handleAddVersion] activeVerId =", activeVerId, "| versions =", versions.map(v => v.id))
     try {
       const newVer = await api.post("/versions/clone", {
         fromVersionId: activeVerId,
@@ -1756,6 +1897,7 @@ export default function App(){
       setCells(prev => ({ ...prev, ...newCells }))
       setActiveVerId(newVer.versionId)
       setDirtyKeys(new Set())
+      setUndoStack([])   // nova versão = novo ponto de partida
     } catch (err) {
       console.error("Clone version:", err)
       alert(`Erro ao criar versão: ${err.message}`)
@@ -1778,6 +1920,18 @@ export default function App(){
     if (!v) return
     const year = Math.floor(period / 100), month = period % 100
     const key  = mk(project.id, verId, period, vid, lid, bid)
+    // Guarda estado anterior no undo stack (máx 5)
+    const currentCell = cells[key]
+    const prevValue   = currentCell?.value ?? null
+    const lang  = project.languages.find(l => l.id === lid)
+    const lob   = lang?.lobs.find(b => b.id === bid)
+    const ctx   = lang && lob ? `${lang.code} / ${lob.name}` : lang ? lang.code : ''
+    const label = `${v.name}${ctx ? ' · ' + ctx : ''} · ${fmtP(period)}: ${prevValue ?? '—'} → ${val ?? '—'}`
+    setUndoStack(prev => [{ vid, lid, bid, period, verId, prevValue, label }, ...prev].slice(0, 5))
+
+    // Limpa o log da interacção anterior
+    setDeltaLog([])
+    setShowDeltaLog(false)
     // Optimistic update imediato
     setCells(prev => ({ ...prev, [key]: { value: val, status: val != null ? "ok" : "empty", source: "manual" } }))
     try {
@@ -1789,8 +1943,9 @@ export default function App(){
         value:  val,
         source: "manual"
       })
-      // Aplica delta calculado pelo servidor
+      // Aplica delta e constrói log com valores antes/depois
       const deltaKeys = new Set()
+      const newLog    = []
       setCells(prev => {
         const updated = { ...prev }
         for (const cell of result.delta) {
@@ -1799,11 +1954,28 @@ export default function App(){
           const dlid = toLangId(cell.languageId)
           const dbid = toLobId(cell.lobId)
           const dk   = mk(project.id, verId, cell.year * 100 + cell.month, dv.id, dlid, dbid)
+          // Captura valor anterior antes de actualizar
+          const beforeVal = prev[dk]?.value ?? null
           updated[dk] = { value: cell.value, status: cell.status, source: cell.source }
           deltaKeys.add(dk)
+          // Constrói entrada do log
+          const lang    = project.languages.find(l => l.id === dlid)
+          const lob     = lang?.lobs.find(b => b.id === dbid)
+          const context = lang && lob ? `${lang.code} / ${lob.name}`
+                        : lang        ? lang.code
+                        : null
+          newLog.push({
+            varName: dv.name,
+            varCode: dv.id,
+            context,
+            period:  cell.year * 100 + cell.month,
+            before:  beforeVal,
+            after:   cell.value
+          })
         }
         return updated
       })
+      setDeltaLog(newLog)
       setDirtyKeys(prev => new Set([...prev, ...deltaKeys]))
     } catch (err) {
       console.error("EditCell:", err)
@@ -2200,12 +2372,41 @@ export default function App(){
       </div>{/* end main panels */}
 
       {/* ── Footer ── */}
-      {hasDirty?(
-        <footer className="bg-orange-50 border-t border-orange-200 px-5 py-2.5 flex items-center gap-5 text-xs text-orange-700 shrink-0 flex-wrap">
-          <span className="font-semibold text-orange-600 shrink-0">Variáveis afectadas:</span>
-          {["lob","language","template"].map(scope=>{const ids=dirtyByScope[scope];if(!ids?.length)return null;return(<div key={scope} className="flex items-center gap-2"><span className={`px-2 py-0.5 rounded-full font-medium text-xs ${SC[scope].badge}`}>{SC[scope].label}</span><span className="font-mono text-orange-800">{ids.join("  ·  ")}</span></div>)})}
+      {(hasDirty || undoStack.length > 0)?(
+        <footer className="bg-orange-50 border-t border-orange-200 px-5 py-2.5 flex items-center gap-3 text-xs shrink-0">
+          <span className="w-2 h-2 rounded-full bg-orange-400 shrink-0"/>
+          <span className="text-orange-700 font-medium shrink-0">
+            {deltaLog.length} variável{deltaLog.length !== 1 ? "es" : ""} afectada{deltaLog.length !== 1 ? "s" : ""}
+          </span>
+          {deltaLog.length > 0 && (
+            <button onClick={()=>setShowDeltaLog(true)}
+              className="text-orange-600 hover:text-orange-800 underline font-medium shrink-0">
+              Ver detalhes
+            </button>
+          )}
+
           <div className="flex-1"/>
-          <button onClick={()=>setDirtyKeys(new Set())} className="text-orange-500 hover:text-orange-700 font-semibold shrink-0">Limpar ×</button>
+
+          {/* Undo stack */}
+          {undoStack.length > 0 && (
+            <div className="flex items-center gap-2 shrink-0">
+              <button onClick={handleUndo}
+                title={undoStack[0]?.label}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-orange-300 text-orange-700 hover:bg-orange-100 rounded-xl font-semibold transition-colors">
+                <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                  <path fillRule="evenodd" d="M7.793 2.232a.75.75 0 01-.025 1.06L3.622 7.28h10.003a5.375 5.375 0 010 10.75H10.75a.75.75 0 010-1.5h2.875a3.875 3.875 0 000-7.75H3.622l4.146 3.988a.75.75 0 01-1.036 1.085l-5.5-5.292a.75.75 0 010-1.085l5.5-5.292a.75.75 0 011.061.025z" clipRule="evenodd"/>
+                </svg>
+                Desfazer
+              </button>
+              <span className="text-orange-400 font-mono text-[10px]">{undoStack.length}/5</span>
+            </div>
+          )}
+
+          {/* Gravar — limpa o histórico de undo */}
+          <button onClick={()=>{setDirtyKeys(new Set());setDeltaLog([]);setShowDeltaLog(false);setUndoStack([])}}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl font-semibold transition-colors shrink-0">
+            Gravar
+          </button>
         </footer>
       ):(
         <footer className="bg-white border-t border-gray-100 px-5 py-2 flex items-center gap-4 text-xs text-gray-400 shrink-0 flex-wrap">
@@ -2214,6 +2415,11 @@ export default function App(){
           {canCompare&&showDelta&&<span className="flex items-center gap-2"><span className="text-indigo-400 font-bold font-mono">Δ</span><span className="text-indigo-400">{deltaLabel}</span></span>}
           <span className="text-gray-500 font-mono">123</span><span>Calculado → hover para fórmula</span>
         </footer>
+      )}
+
+      {/* ── Delta log modal ── */}
+      {showDeltaLog && deltaLog.length > 0 && (
+        <DeltaLogModal entries={deltaLog} onClose={()=>setShowDeltaLog(false)}/>
       )}
 
       {/* ── Modals ── */}

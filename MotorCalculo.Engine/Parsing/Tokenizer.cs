@@ -5,16 +5,20 @@ namespace MotorCalculo.Engine.Parsing;
 /// <summary>
 /// Converte uma string de expressão numa lista de tokens.
 /// Suporta: números, variáveis, operadores +−×÷, parêntesis e qualificadores [].
-/// Palavras-chave: PREV, SUM_LOBS, SUM_LANGS (case-insensitive).
+/// Palavras-chave: PREV, SUM_LOBS, SUM_LANGS, COUNT_LOBS, COUNT_LANGS, WEIGHT (case-insensitive).
 /// </summary>
 public static class Tokenizer
 {
     private static readonly Dictionary<string, TokenType> Keywords =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["PREV"]      = TokenType.Prev,
-            ["SUM_LOBS"]  = TokenType.SumLobs,
-            ["SUM_LANGS"] = TokenType.SumLangs,
+            ["PREV"]       = TokenType.Prev,
+            ["SUM_LOBS"]   = TokenType.SumLobs,
+            ["SUM_LANGS"]  = TokenType.SumLangs,
+            ["COUNT_LOBS"] = TokenType.CountLobs,
+            ["COUNT_LANGS"]= TokenType.CountLangs,
+            ["WEIGHT"]      = TokenType.Weight,
+            ["WEIGHT_LANG"]  = TokenType.WeightLang,
         };
 
     public static List<Token> Tokenize(string expression)

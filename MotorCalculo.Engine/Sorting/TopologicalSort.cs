@@ -33,6 +33,10 @@ public static class TopologicalSort
         PrevNode     p  => [p.Code],
         SumLobsNode  sl => [sl.Code],
         SumLangsNode sg => [sg.Code],
+        WeightNode     w  => [w.Code],
+        WeightLangNode wl => [wl.Code],
+        CountLobsNode _ => Enumerable.Empty<string>(),
+        CountLangsNode _ => Enumerable.Empty<string>(),
         BinaryOpNode op => ExtractDependencies(op.Left).Concat(ExtractDependencies(op.Right)),
         _               => []
     };

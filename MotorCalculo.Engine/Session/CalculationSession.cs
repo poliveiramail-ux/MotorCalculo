@@ -67,6 +67,10 @@ public sealed class CalculationSession
         if (!_byId.TryGetValue(editedKey.VariableId, out var editedVar))
             return [];
 
+        // Snapshot imutável das células no início da sessão.
+        // Usado por WEIGHT() para evitar circularidade.
+        IReadOnlyDictionary<CellKey, CellValue> snapshot = cells;
+
         // Cópia de trabalho — o motor não muta o input
         var working = new Dictionary<CellKey, CellValue>(cells);
 
@@ -135,7 +139,7 @@ public sealed class CalculationSession
 
                     var ctx = new EvaluationContext(
                         editedKey.VersionId, year, month,
-                        langId, lobId, _project, _codeToId, _scopeById, working);
+                        langId, lobId, _project, _codeToId, _scopeById, working, snapshot);
 
                     var (value, status) = Evaluator.Evaluate(ast, ctx);
 
