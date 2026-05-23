@@ -1,0 +1,36 @@
+using MotorCalculo.Engine.Models;
+
+namespace MotorCalculo.Engine.Evaluation;
+
+/// <summary>
+/// Contexto passado ao Evaluator para avaliar um nó AST.
+/// Contém a posição corrente na grelha e o estado completo das células.
+/// </summary>
+public sealed record EvaluationContext(
+    /// <summary>Versão em avaliação.</summary>
+    int VersionId,
+
+    /// <summary>Ano do período em avaliação.</summary>
+    int Year,
+
+    /// <summary>Mês do período em avaliação (1-12).</summary>
+    int Month,
+
+    /// <summary>Língua do contexto corrente. Null para scope='template'.</summary>
+    int? LanguageId,
+
+    /// <summary>LOB do contexto corrente. Null para scope≠'lob'.</summary>
+    int? LobId,
+
+    /// <summary>Estrutura do projecto — línguas e LOBs com os seus códigos.</summary>
+    ProjectStructure Project,
+
+    /// <summary>Mapa code → variableId para resolver referências nas fórmulas.</summary>
+    IReadOnlyDictionary<string, int> VariableCodeToId,
+
+    /// <summary>Mapa variableId → scopeCode ("template"|"language"|"lob") para resolver cross-scope.</summary>
+    IReadOnlyDictionary<int, string> VariableIdToScope,
+
+    /// <summary>Estado completo das células no momento da avaliação.</summary>
+    IReadOnlyDictionary<CellKey, CellValue> Cells
+);

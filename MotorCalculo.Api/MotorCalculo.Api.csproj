@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>MotorCalculo.Api</RootNamespace>
+    <!-- IIS in-process: mais performance que out-of-process -->
+    <AspNetCoreHostingModel>InProcess</AspNetCoreHostingModel>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OpenAPI/Swagger -->
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- A API referencia Application (que referencia Infrastructure e Engine) -->
+    <ProjectReference Include="..\MotorCalculo.Application\MotorCalculo.Application.csproj" />
+    <!-- Referência directa à Infrastructure para o AddInfrastructure() -->
+    <ProjectReference Include="..\MotorCalculo.Infrastructure\MotorCalculo.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

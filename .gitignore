@@ -1,0 +1,14 @@
+# Build 
+**/bin/ 
+**/obj/ 
+**/publish/ 
+# Frontend 
+frontend/node_modules/ 
+frontend/dist/ 
+# VS 
+.vs/ 
+*.user 
+# Secrets 
+**/appsettings.Production.json 
+# Backups 
+**/*_backup.cs 

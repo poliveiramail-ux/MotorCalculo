@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="MotorCalculo.Application/MotorCalculo.Application.csproj" />
+  <Project Path="MotorCalculo.Engine.Tests/MotorCalculo.Engine.Tests.csproj" />
+  <Project Path="MotorCalculo.Engine/MotorCalculo.Engine.csproj" />
+  <Project Path="MotorCalculo.Infrastructure/MotorCalculo.Infrastructure.csproj" />
+</Solution>
