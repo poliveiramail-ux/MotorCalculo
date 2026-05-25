@@ -34,17 +34,26 @@ public sealed class VersionService(IVersionRepository versionRepo)
         return Map(version);
     }
 
+    public async Task<IReadOnlyList<VersionTypeDto>> GetVersionTypesAsync(CancellationToken ct = default)
+    {
+        var types = await versionRepo.GetAllVersionTypesAsync(ct);
+        return types.Select(t => new VersionTypeDto(
+            t.VersionTypeId, t.Code, t.Name, t.IsLocked, t.SortOrder
+        )).ToList();
+    }
+
     public async Task<VersionResponse> CloneAsync(
         CloneVersionRequest request, CancellationToken ct = default)
     {
         var version = await versionRepo.CloneAsync(
-            request.FromVersionId, request.Code, request.Name, ct);
+            request.FromVersionId, request.Code, request.Name, request.VersionTypeId, ct);
         return Map(version);
     }
 
     private static VersionResponse Map(VersionEntity v) => new(
         v.VersionId, v.ProjectId, v.Code, v.Name,
-        v.ClonedFromId, v.ColorIndex, v.CreatedAt);
+        v.ClonedFromId, v.ColorIndex, v.CreatedAt,
+        v.VersionTypeId, v.VersionType?.Name, v.VersionType?.IsLocked ?? false);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -75,8 +84,9 @@ public sealed class TemplateService(ITemplateRepository templateRepo)
             ScopeCode:     v.ScopeCode,
             IsInput:       v.IsInput,
             ExternalField: v.ExternalField,
-            SortOrder:     0,
-            GroupId:       null,
+            SortOrder:     v.SortOrder,
+            GroupId:       v.GroupId,
+            GroupName:     v.GroupName,
             Formulas:      v.Formulas.Select(f => new FormulaResponse(
                 f.FormulaId, f.FormulaType, f.Expression, f.TriggerVariableId
             )).ToList()

@@ -32,7 +32,9 @@ public sealed class TemplateRepository(MotorCalculoDbContext db) : ITemplateRepo
             .AsNoTracking()
             .Where(v => v.TemplateId == templateId)
             .Include(v => v.Formulas)
-            .OrderBy(v => v.SortOrder)
+            .Include(v => v.Group)
+            .OrderBy(v => v.Group!.SortOrder)
+            .ThenBy(v => v.SortOrder)
             .ToListAsync(ct);
 
         return variables.Select(MapToDefinition).ToList();
@@ -48,6 +50,10 @@ public sealed class TemplateRepository(MotorCalculoDbContext db) : ITemplateRepo
         ScopeCode     = entity.ScopeCode,
         IsInput       = entity.IsInput,
         ExternalField = entity.ExternalField,
+        GroupId       = entity.GroupId,
+        GroupName     = entity.Group?.Name,
+        GroupOrder    = entity.Group?.SortOrder ?? 999,
+        SortOrder     = entity.SortOrder,
         Formulas      = entity.Formulas
                               .OrderBy(f => f.SortOrder)
                               .Select(MapToFormula)
@@ -62,6 +68,38 @@ public sealed class TemplateRepository(MotorCalculoDbContext db) : ITemplateRepo
         TriggerVariableId = entity.TriggerVariableId,
         SortOrder         = entity.SortOrder,
     };
+
+    public async Task<TemplateEntity> CreateAsync(
+        string code, string name, string? description, CancellationToken ct = default)
+    {
+        var entity = new TemplateEntity
+        {
+            Code = code, Name = name, Description = description,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+        };
+        db.Templates.Add(entity);
+        await db.SaveChangesAsync(ct);
+        return entity;
+    }
+
+    public async Task<TemplateEntity> UpdateAsync(
+        int templateId, string code, string name, string? description, CancellationToken ct = default)
+    {
+        var entity = await db.Templates.FindAsync([templateId], ct)
+            ?? throw new KeyNotFoundException($"Template {templateId} not found.");
+        entity.Code = code; entity.Name = name;
+        entity.Description = description; entity.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return entity;
+    }
+
+    public async Task DeleteAsync(int templateId, CancellationToken ct = default)
+    {
+        var entity = await db.Templates.FindAsync([templateId], ct)
+            ?? throw new KeyNotFoundException($"Template {templateId} not found.");
+        db.Templates.Remove(entity);
+        await db.SaveChangesAsync(ct);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -126,5 +164,23 @@ public sealed class ProjectRepository(MotorCalculoDbContext db) : IProjectReposi
         db.Projects.Add(project);
         await db.SaveChangesAsync(ct);
         return project;
+    }
+
+    public async Task<ProjectEntity> UpdateAsync(
+        int projectId, string name, int templateId, CancellationToken ct = default)
+    {
+        var entity = await db.Projects.FindAsync([projectId], ct)
+            ?? throw new KeyNotFoundException($"Project {projectId} not found.");
+        entity.Name = name; entity.TemplateId = templateId;
+        await db.SaveChangesAsync(ct);
+        return entity;
+    }
+
+    public async Task DeleteAsync(int projectId, CancellationToken ct = default)
+    {
+        var entity = await db.Projects.FindAsync([projectId], ct)
+            ?? throw new KeyNotFoundException($"Project {projectId} not found.");
+        db.Projects.Remove(entity);
+        await db.SaveChangesAsync(ct);
     }
 }

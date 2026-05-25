@@ -28,6 +28,9 @@ public interface ITemplateRepository
     /// </summary>
     Task<IReadOnlyList<VariableDefinition>> GetVariableDefinitionsAsync(
         int templateId, CancellationToken ct = default);
+    Task<TemplateEntity>  CreateAsync(string code, string name, string? description, CancellationToken ct = default);
+    Task<TemplateEntity>  UpdateAsync(int templateId, string code, string name, string? description, CancellationToken ct = default);
+    Task                  DeleteAsync(int templateId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -45,6 +48,8 @@ public interface IProjectRepository
     Task<ProjectStructure?> GetStructureAsync(int projectId, CancellationToken ct = default);
 
     Task<ProjectEntity> CreateAsync(int templateId, string code, string name, CancellationToken ct = default);
+    Task<ProjectEntity> UpdateAsync(int projectId, string name, int templateId, CancellationToken ct = default);
+    Task                DeleteAsync(int projectId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -54,16 +59,17 @@ public interface IVersionRepository
 {
     Task<VersionEntity?> GetByIdAsync(int versionId, CancellationToken ct = default);
     Task<IReadOnlyList<VersionEntity>> GetByProjectIdAsync(int projectId, CancellationToken ct = default);
+    Task<IReadOnlyList<VersionTypeEntity>> GetAllVersionTypesAsync(CancellationToken ct = default);
+    Task<VersionTypeEntity?>               GetVersionTypeByIdAsync(int id, CancellationToken ct = default);
+    Task<VersionTypeEntity>                CreateVersionTypeAsync(string code, string name, bool isLocked, int sortOrder, CancellationToken ct = default);
+    Task<VersionTypeEntity>                UpdateVersionTypeAsync(int id, string code, string name, bool isLocked, int sortOrder, CancellationToken ct = default);
+    Task                                   DeleteVersionTypeAsync(int id, CancellationToken ct = default);
 
     Task<VersionEntity> CreateAsync(
         int projectId, string code, string name, CancellationToken ct = default);
 
-    /// <summary>
-    /// Cria uma nova versão copiando todos os CellValues da versão de origem.
-    /// Executado em transacção — atómico.
-    /// </summary>
     Task<VersionEntity> CloneAsync(
-        int fromVersionId, string code, string name, CancellationToken ct = default);
+        int fromVersionId, string code, string name, int? versionTypeId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -94,4 +100,14 @@ public interface ICellRepository
 
     /// <summary>Verifica se o log de cálculo está activo (EngineConfig).</summary>
     Task<bool> IsCalculationLogEnabledAsync(CancellationToken ct = default);
+}
+
+public interface IVariableGroupRepository
+{
+    Task<IReadOnlyList<VariableGroupEntity>> GetAllAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<VariableGroupEntity>> GetByTemplateAsync(int templateId, CancellationToken ct = default);
+    Task<VariableGroupEntity?>               GetByIdAsync(int groupId, CancellationToken ct = default);
+    Task<VariableGroupEntity>                CreateAsync(int templateId, string code, string name, int sortOrder, CancellationToken ct = default);
+    Task<VariableGroupEntity>                UpdateAsync(int groupId, string code, string name, int sortOrder, CancellationToken ct = default);
+    Task                                     DeleteAsync(int groupId, CancellationToken ct = default);
 }

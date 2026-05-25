@@ -148,9 +148,10 @@ public sealed class CellService(
         Value:      value.Value,
         Status:     value.Status switch
         {
-            CellStatus.Ok    => "ok",
-            CellStatus.Error => "error",
-            _                => "empty"
+            CellStatus.Ok       => "ok",
+            CellStatus.Error    => "error",
+            CellStatus.Circular => "circular",
+            _                   => "empty"
         },
         Source:     value.Source switch
         {

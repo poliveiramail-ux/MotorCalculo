@@ -20,6 +20,10 @@ public sealed record VariableDefinition
     /// Null → variável não recebe dados importados.
     /// </summary>
     public string? ExternalField { get; init; }
+    public int?    GroupId      { get; init; }
+    public string? GroupName    { get; init; }
+    public int     GroupOrder   { get; init; }
+    public int     SortOrder    { get; init; }
 
     /// <summary>
     /// Fórmulas associadas. Vazio para inputs.

@@ -34,7 +34,7 @@ public class TopologicalSortTests
             Input("v_cus", 3),
         };
 
-        var sorted = TopologicalSort.Sort(vars).ToList();
+        var sorted = TopologicalSort.SortStrict(vars).ToList();
         var idxRec = sorted.IndexOf("v_rec");
         var idxCus = sorted.IndexOf("v_cus");
         var idxMar = sorted.IndexOf("v_mar");
@@ -56,7 +56,7 @@ public class TopologicalSortTests
             Input("v_cus", 4),
         };
 
-        var sorted = TopologicalSort.Sort(vars).ToList();
+        var sorted = TopologicalSort.SortStrict(vars).ToList();
         sorted.IndexOf("v_mar").Should().BeLessThan(sorted.IndexOf("v_pct"));
         sorted.IndexOf("v_rec").Should().BeLessThan(sorted.IndexOf("v_mar"));
     }
@@ -70,7 +70,7 @@ public class TopologicalSortTests
             Calc("v_b", 2, "v_a + 1"),  // circular!
         };
 
-        var act = () => TopologicalSort.Sort(vars);
+        var act = () => TopologicalSort.SortStrict(vars);
         act.Should().Throw<CircularDependencyException>();
     }
 
@@ -81,7 +81,7 @@ public class TopologicalSortTests
             .Select(i => Input($"v_{i}", i))
             .ToList<VariableDefinition>();
 
-        var sorted = TopologicalSort.Sort(vars).ToList();
+        var sorted = TopologicalSort.SortStrict(vars).ToList();
         sorted.Should().HaveCount(5);
     }
 }

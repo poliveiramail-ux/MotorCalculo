@@ -1,3 +1,4 @@
+using MotorCalculo.Engine.Exceptions;
 using System.Net;
 using System.Text.Json;
 using MotorCalculo.Application.Exceptions;
@@ -29,7 +30,8 @@ public sealed class ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorH
     {
         var (status, message) = ex switch
         {
-            NotFoundException  nfe => (HttpStatusCode.NotFound,            nfe.Message),
+            NotFoundException            nfe => (HttpStatusCode.NotFound,         nfe.Message),
+            CircularDependencyException cde => (HttpStatusCode.UnprocessableEntity, cde.Message),
             ValidationException ve => (HttpStatusCode.BadRequest,          ve.Message),
             InvalidOperationException ioe => (HttpStatusCode.Conflict,     ioe.Message),
             _                              => (HttpStatusCode.InternalServerError, "Erro interno do servidor.")

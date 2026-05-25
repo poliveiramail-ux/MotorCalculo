@@ -35,6 +35,8 @@ public sealed class CalculationSession
     private readonly Dictionary<string, HashSet<string>>    _reverseDeps;  // code → dependentes
     // formulaId → conjunto de códigos de variáveis que a fórmula referencia (main + alternatives)
     private readonly Dictionary<int, HashSet<string>>       _formulaDeps;
+    /// <summary>Variáveis em dependência circular — marcadas como Circular no cálculo.</summary>
+    private readonly HashSet<string>                         _circularCodes;
 
     public CalculationSession(
         IReadOnlyList<VariableDefinition> variables,
@@ -44,7 +46,9 @@ public sealed class CalculationSession
         _variables    = variables;
         _periods      = [.. periods.OrderBy(p => p)];   // garante ordem cronológica
         _project      = project;
-        _sortedCodes  = TopologicalSort.Sort(variables);
+        var (sorted, circular) = TopologicalSort.Sort(variables);
+        _sortedCodes    = sorted;
+        _circularCodes  = circular.ToHashSet();
         _byCode       = variables.ToDictionary(v => v.Code);
         _byId         = variables.ToDictionary(v => v.VariableId);
         _codeToId     = variables.ToDictionary(v => v.Code, v => v.VariableId);
@@ -128,6 +132,21 @@ public sealed class CalculationSession
                     if (working.TryGetValue(key, out var existing) &&
                         existing.Source == CellSource.Imported)
                         continue;
+
+                    // Variável circular — marca como Circular sem calcular
+                    if (_circularCodes.Contains(variable.Code))
+                    {
+                        var circKey = new CellKey(editedKey.VersionId, year, month,
+                                                   variable.VariableId, langId, lobId);
+                        var circBefore = working.GetValueOrDefault(circKey, CellValue.Empty());
+                        var circCell   = new CellValue { Status = CellStatus.Circular, Source = CellSource.Formula };
+                        if (circCell.Status != circBefore.Status)
+                        {
+                            working[circKey] = circCell;
+                            delta.Add(new CalculatedCell(circKey, circBefore, circCell, step++, null));
+                        }
+                        continue;
+                    }
 
                     var formula = SelectFormula(variable, key, working, affectedCodes);
                     if (formula is null) continue;

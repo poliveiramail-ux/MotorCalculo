@@ -30,6 +30,12 @@ public enum CellStatus
     Error,
 
     /// <summary>
+    /// Dependência circular detectada — a variável faz parte de um ciclo.
+    /// Distingue-se de Error para apresentação na grelha (CIRC vs ERR).
+    /// </summary>
+    Circular,
+
+    /// <summary>
     /// Célula por preencher — input a montante ainda não introduzido.
     /// Propaga mas cede a Error.
     /// </summary>

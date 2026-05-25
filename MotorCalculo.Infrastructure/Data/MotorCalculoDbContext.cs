@@ -22,6 +22,7 @@ public sealed class MotorCalculoDbContext(DbContextOptions<MotorCalculoDbContext
     public DbSet<LanguageEntity>        Languages         => Set<LanguageEntity>();
     public DbSet<LobEntity>             Lobs              => Set<LobEntity>();
     public DbSet<VersionEntity>         Versions          => Set<VersionEntity>();
+    public DbSet<VersionTypeEntity>     VersionTypes      => Set<VersionTypeEntity>();
     public DbSet<CellValueEntity>       CellValues        => Set<CellValueEntity>();
     public DbSet<CalculationLogEntity>  CalculationLogs   => Set<CalculationLogEntity>();
 
@@ -164,6 +165,18 @@ public sealed class MotorCalculoDbContext(DbContextOptions<MotorCalculoDbContext
             e.HasIndex(x => new { x.LanguageId, x.Code }).IsUnique();
         });
 
+        // ── VersionType ──────────────────────────────────────
+        model.Entity<VersionTypeEntity>(e =>
+        {
+            e.ToTable("VersionType");
+            e.HasKey(x => x.VersionTypeId);
+            e.Property(x => x.VersionTypeId).HasColumnName("version_type_id").UseIdentityColumn();
+            e.Property(x => x.Code).HasColumnName("code").HasMaxLength(20).IsRequired();
+            e.Property(x => x.Name).HasColumnName("name").HasMaxLength(100).IsRequired();
+            e.Property(x => x.IsLocked).HasColumnName("is_locked").HasDefaultValue(false);
+            e.Property(x => x.SortOrder).HasColumnName("sort_order").HasDefaultValue(0);
+        });
+
         // ── Version ───────────────────────────────────────────
         model.Entity<VersionEntity>(e =>
         {
@@ -175,10 +188,15 @@ public sealed class MotorCalculoDbContext(DbContextOptions<MotorCalculoDbContext
             e.Property(x => x.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
             e.Property(x => x.ClonedFromId).HasColumnName("cloned_from_id");
             e.Property(x => x.ColorIndex).HasColumnName("color_index").HasDefaultValue((byte)0);
+            e.Property(x => x.VersionTypeId).HasColumnName("version_type_id");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("GETUTCDATE()");
             e.HasOne(x => x.Project)
              .WithMany(x => x.Versions)
              .HasForeignKey(x => x.ProjectId);
+            e.HasOne(x => x.VersionType)
+             .WithMany()
+             .HasForeignKey(x => x.VersionTypeId)
+             .IsRequired(false);
             e.HasOne(x => x.ClonedFrom)
              .WithMany()
              .HasForeignKey(x => x.ClonedFromId)

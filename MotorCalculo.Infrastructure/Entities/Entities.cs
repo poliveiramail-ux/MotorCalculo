@@ -112,18 +112,31 @@ public class LobEntity
     public LanguageEntity? Language { get; set; }
 }
 
-public class VersionEntity
+/// <summary>Tipo de versão — configurável na BD.</summary>
+public sealed class VersionTypeEntity
 {
-    public int     VersionId     { get; set; }
-    public int     ProjectId     { get; set; }
+    public int     VersionTypeId { get; set; }
     public string  Code          { get; set; } = "";
     public string  Name          { get; set; } = "";
-    public int?    ClonedFromId  { get; set; }
-    public byte    ColorIndex    { get; set; }
-    public DateTime CreatedAt    { get; set; }
+    /// <summary>Se true, o user não pode editar células nesta versão.</summary>
+    public bool    IsLocked      { get; set; }
+    public int     SortOrder     { get; set; }
+}
 
-    public ProjectEntity?  Project     { get; set; }
-    public VersionEntity?  ClonedFrom  { get; set; }
+public class VersionEntity
+{
+    public int     VersionId      { get; set; }
+    public int     ProjectId      { get; set; }
+    public string  Code           { get; set; } = "";
+    public string  Name           { get; set; } = "";
+    public int?    ClonedFromId   { get; set; }
+    public byte    ColorIndex     { get; set; }
+    public int?    VersionTypeId  { get; set; }
+    public DateTime CreatedAt     { get; set; }
+
+    public ProjectEntity?     Project     { get; set; }
+    public VersionEntity?     ClonedFrom  { get; set; }
+    public VersionTypeEntity? VersionType { get; set; }
 }
 
 /// <summary>

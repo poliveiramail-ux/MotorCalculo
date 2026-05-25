@@ -17,11 +17,27 @@ public static class TopologicalSort
     /// Devolve os códigos das variáveis na ordem em que devem ser avaliadas.
     /// Variáveis de input aparecem antes das calculadas.
     /// </summary>
-    public static IReadOnlyList<string> Sort(IReadOnlyList<VariableDefinition> variables)
+    /// <summary>
+    /// Ordena as variáveis. Devolve (sortedCodes, circularCodes).
+    /// Se existirem ciclos, circularCodes contém os envolvidos e sortedCodes
+    /// contém apenas as variáveis não circulares na ordem correcta.
+    /// </summary>
+    public static (IReadOnlyList<string> Sorted, IReadOnlyList<string> Circular)
+        Sort(IReadOnlyList<VariableDefinition> variables)
     {
         var allCodes = variables.Select(v => v.Code).ToHashSet();
         var deps     = BuildDependencies(variables, allCodes);
         return KahnSort(variables.Select(v => v.Code).ToList(), deps);
+    }
+
+    /// <summary>Mantém compatibilidade com o teste existente — lança excepção se houver ciclo.</summary>
+    public static IReadOnlyList<string> SortStrict(IReadOnlyList<VariableDefinition> variables)
+    {
+        var (sorted, circular) = Sort(variables);
+        if (circular.Count > 0)
+            throw new CircularDependencyException(
+                $"Dependência circular: {string.Join(", ", circular)}");
+        return sorted;
     }
 
     /// <summary>
@@ -82,14 +98,12 @@ public static class TopologicalSort
     }
 
     /// <summary>Kahn's algorithm: ordenação topológica por grau de entrada.</summary>
-    private static IReadOnlyList<string> KahnSort(
+    private static (IReadOnlyList<string> Sorted, IReadOnlyList<string> Circular) KahnSort(
         List<string> nodes,
         Dictionary<string, HashSet<string>> deps)
     {
         // Grau de entrada: quantas variáveis esta depende
-        var inDegree = nodes.ToDictionary(n => n, _ => 0);
-
-        // Lista de adjacência inversa: dep → lista de variáveis que dependem de dep
+        var inDegree  = nodes.ToDictionary(n => n, _ => 0);
         var adjacency = nodes.ToDictionary(n => n, _ => new List<string>());
 
         foreach (var (node, nodeDeps) in deps)
@@ -100,7 +114,6 @@ public static class TopologicalSort
                 inDegree[node]++;
             }
 
-        // Fila inicial: variáveis sem dependências (inputs primeiro)
         var queue  = new Queue<string>(nodes.Where(n => inDegree[n] == 0));
         var result = new List<string>(nodes.Count);
 
@@ -108,19 +121,13 @@ public static class TopologicalSort
         {
             var current = queue.Dequeue();
             result.Add(current);
-
             foreach (var dependent in adjacency[current])
-            {
                 if (--inDegree[dependent] == 0)
                     queue.Enqueue(dependent);
-            }
         }
 
-        if (result.Count != nodes.Count)
-            throw new CircularDependencyException(
-                "Dependência circular detectada no grafo de fórmulas. " +
-                $"Variáveis não ordenadas: {string.Join(", ", nodes.Except(result))}");
-
-        return result;
+        // Variáveis não ordenadas fazem parte de ciclos
+        var circular = nodes.Except(result).ToList();
+        return (result, circular);
     }
 }

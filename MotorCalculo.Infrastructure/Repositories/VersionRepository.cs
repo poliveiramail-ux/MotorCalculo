@@ -18,6 +18,47 @@ public sealed class VersionRepository(MotorCalculoDbContext db) : IVersionReposi
                              .OrderBy(v => v.CreatedAt)
                              .ToListAsync(ct);
 
+    public async Task<IReadOnlyList<VersionTypeEntity>> GetAllVersionTypesAsync(
+        CancellationToken ct = default)
+        => await db.VersionTypes
+                   .AsNoTracking()
+                   .OrderBy(t => t.SortOrder)
+                   .ToListAsync(ct);
+
+    public async Task<VersionTypeEntity?> GetVersionTypeByIdAsync(int id, CancellationToken ct = default)
+        => await db.VersionTypes.FindAsync([id], ct);
+
+    public async Task<VersionTypeEntity> CreateVersionTypeAsync(
+        string code, string name, bool isLocked, int sortOrder, CancellationToken ct = default)
+    {
+        var entity = new VersionTypeEntity
+        {
+            Code = code, Name = name, IsLocked = isLocked, SortOrder = sortOrder
+        };
+        db.VersionTypes.Add(entity);
+        await db.SaveChangesAsync(ct);
+        return entity;
+    }
+
+    public async Task<VersionTypeEntity> UpdateVersionTypeAsync(
+        int id, string code, string name, bool isLocked, int sortOrder, CancellationToken ct = default)
+    {
+        var entity = await db.VersionTypes.FindAsync([id], ct)
+            ?? throw new KeyNotFoundException($"VersionType {id} not found.");
+        entity.Code = code; entity.Name = name;
+        entity.IsLocked = isLocked; entity.SortOrder = sortOrder;
+        await db.SaveChangesAsync(ct);
+        return entity;
+    }
+
+    public async Task DeleteVersionTypeAsync(int id, CancellationToken ct = default)
+    {
+        var entity = await db.VersionTypes.FindAsync([id], ct)
+            ?? throw new KeyNotFoundException($"VersionType {id} not found.");
+        db.VersionTypes.Remove(entity);
+        await db.SaveChangesAsync(ct);
+    }
+
     public async Task<VersionEntity> CreateAsync(
         int projectId, string code, string name, CancellationToken ct = default)
     {
@@ -40,7 +81,7 @@ public sealed class VersionRepository(MotorCalculoDbContext db) : IVersionReposi
     /// Executado em transacção — atómico.
     /// </summary>
     public async Task<VersionEntity> CloneAsync(
-        int fromVersionId, string code, string name, CancellationToken ct = default)
+        int fromVersionId, string code, string name, int? versionTypeId, CancellationToken ct = default)
     {
         // SqlServerRetryingExecutionStrategy não suporta transacções manuais directas.
         // É necessário envolver a transacção em CreateExecutionStrategy().ExecuteAsync().

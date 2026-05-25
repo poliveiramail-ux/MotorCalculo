@@ -34,6 +34,24 @@ const api = {
       throw new Error(`API POST ${path}: ${r.status}${detail ? " — " + detail : ""}`)
     }
     return r.json()
+  },
+  async put(path, body) {
+    const r = await fetch(API_BASE + path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+    if (!r.ok) {
+      let detail = ""
+      try { const j = await r.json(); detail = j.message || j.title || j.detail || JSON.stringify(j) } catch {}
+      throw new Error(`API PUT ${path}: ${r.status}${detail ? " — " + detail : ""}`)
+    }
+    return r.json()
+  },
+  async delete(path) {
+    const r = await fetch(API_BASE + path, { method: "DELETE" })
+    if (!r.ok && r.status !== 204) throw new Error(`API DELETE ${path}: ${r.status}`)
+    return null
   }
 }
 
@@ -47,8 +65,7 @@ const fromLobId  = bid => bid ? parseInt(bid.slice(2)) : null
 // Apenas lista de projectos — sem carregar variáveis, versões ou células
 async function loadProjectList() {
   const projects = await api.get("/projects")
-  if (!projects.length) throw new Error("Sem projectos na base de dados.")
-  return projects
+  return Array.isArray(projects) ? projects : []
 }
 
 async function loadFromApi(projectId = null) {
@@ -96,6 +113,8 @@ async function loadFromApi(projectId = null) {
       }))
       .filter(a => a.trigger),
     defaultFormula: v.formulas?.find(f => f.formulaType === "default")?.expression ?? null,
+    groupId:   v.groupId   ?? null,
+    groupName: v.groupName ?? null,
     _apiId: v.variableId
   }))
 
@@ -770,9 +789,22 @@ function OrderBadge({ n }) {
   )
 }
 
-function EditableCell({ value, onChange, dirty, toEdit }) {
+function EditableCell({ value, onChange, dirty, toEdit, locked }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
+
+  // Célula bloqueada — mostra valor sem interacção
+  if (locked) return (
+    <div className="relative px-3 py-2 text-right text-sm font-mono text-gray-400 cursor-not-allowed select-none"
+         title={locked === "past" ? "Período passado — não editável" : "Versão bloqueada — não editável"}>
+      {value != null
+        ? <span>{fmtV(value)}</span>
+        : <span className="text-gray-200 text-xs font-sans">—</span>
+      }
+      <span className="absolute top-0.5 right-0.5 text-[8px] text-gray-300">🔒</span>
+    </div>
+  )
+
   if (editing) return (
     <input className="w-full px-3 py-2 text-right text-sm bg-sky-50 border-2 border-sky-400 outline-none font-mono"
       value={draft} autoFocus onChange={e => setDraft(e.target.value)}
@@ -794,15 +826,18 @@ function EditableCell({ value, onChange, dirty, toEdit }) {
   )
 }
 
-function CalcCell({ value, formula, altFormula, activeTriggerId, dirty }) {
+function CalcCell({ value, formula, altFormula, activeTriggerId, dirty, status }) {
   const [tip, setTip] = useState(false)
   const displayFm = altFormula ?? formula
-  const isErr = value === null && displayFm != null
+  const isCircular = status === "circular"
+  const isErr = !isCircular && value === null && displayFm != null
   return (
     <div onMouseEnter={() => setTip(true)} onMouseLeave={() => setTip(false)}
       className={`relative px-3 py-2 text-right text-sm font-mono select-none transition-all ${dirty ? "bg-orange-50" : ""}`}>
       {dirty && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-orange-400" />}
-      {isErr
+      {isCircular
+        ? <span className="text-purple-600 text-xs font-sans font-bold" title="Dependência circular">CIRC</span>
+        : isErr
         ? <span className="text-red-500 text-xs font-sans font-semibold">ERR</span>
         : value != null
           ? <span className={dirty ? "text-orange-700 font-semibold" : altFormula ? "text-violet-600" : "text-gray-500"}>{fmtV(value)}</span>
@@ -844,17 +879,120 @@ function Badge({ scope }) {
    TEMPLATE MODAL — define o template: nome, descrição e variáveis
    ═══════════════════════════════════════════════════════════════ */
 
-function TemplateModal({ template, vars, onSave, onClose, onNewTemplate, onEditVar, onAddVar }) {
-  const [name, setName]   = useState(template.name)
-  const [desc, setDesc]   = useState(template.description ?? "")
+function TemplateModal({ initialTemplateId, onClose, onEditVar, onAddVar }) {
+  const [allTemplates, setAllTemplates] = useState([])
+  const [activeId,     setActiveId]     = useState(initialTemplateId ?? null)
+  const [vars,         setVars]         = useState([])
+  const [name,         setName]         = useState("")
+  const [desc,         setDesc]         = useState("")
+  const [loading,      setLoading]      = useState(true)
+  const [loadingVars,  setLoadingVars]  = useState(false)
+  const [saving,       setSaving]       = useState(false)
+  const [deleting,     setDeleting]     = useState(false)
 
+  // Load all templates on mount
+  useEffect(() => {
+    api.get('/admin/templates')
+      .then(tpls => {
+        setAllTemplates(tpls)
+        const first = initialTemplateId
+          ? tpls.find(t => t.templateId === initialTemplateId)
+          : tpls[0]
+        if (first) {
+          setActiveId(first.templateId)
+          setName(first.name)
+          setDesc(first.description ?? "")
+        }
+      })
+      .catch(e => console.error(e))
+      .finally(() => setLoading(false))
+  }, [])
+
+  // Load variables when active template changes
+  useEffect(() => {
+    if (!activeId) return
+    setLoadingVars(true)
+    api.get(`/templates/${activeId}/variables`)
+      .then(data => {
+        const apiVars = data ?? []
+        setVars(apiVars.map(v => ({
+          id: v.code,
+          name: v.name,
+          scope: v.scopeCode,
+          isInput: v.isInput,
+          formula: v.formulas?.find(f => f.formulaType === "main")?.expression ?? null,
+          alternatives: (v.formulas ?? []).filter(f => f.formulaType === "alternative").length,
+          _apiId: v.variableId
+        })))
+      })
+      .catch(e => console.error(e))
+      .finally(() => setLoadingVars(false))
+  }, [activeId])
+
+  const switchTemplate = (idStr) => {
+    const id = parseInt(idStr)
+    const tpl = allTemplates.find(t => t.templateId === id)
+    if (!tpl) return
+    setActiveId(id)
+    setName(tpl.name)
+    setDesc(tpl.description ?? "")
+    setVars([])
+  }
+
+  const handleSave = async () => {
+    if (!activeId || !name.trim()) return
+    setSaving(true)
+    try {
+      const updated = await api.put(`/admin/templates/${activeId}`, { code: "", name: name.trim(), description: desc })
+      setAllTemplates(prev => prev.map(t => t.templateId === activeId ? {...t, name: updated.name, description: updated.description} : t))
+    } catch(e) { alert('Erro ao guardar: ' + e.message) }
+    finally { setSaving(false) }
+  }
+
+  const handleNew = async () => {
+    try {
+      const created = await api.post('/admin/templates', { code: `tpl_${Date.now()}`, name: "Novo Template", description: "" })
+      setAllTemplates(prev => [...prev, created])
+      setActiveId(created.templateId)
+      setName(created.name)
+      setDesc(created.description ?? "")
+      setVars([])
+    } catch(e) { alert('Erro ao criar: ' + e.message) }
+  }
+
+  const handleDelete = async () => {
+    try {
+      await api.delete(`/admin/templates/${activeId}`)
+      const remaining = allTemplates.filter(t => t.templateId !== activeId)
+      setAllTemplates(remaining)
+      if (remaining.length > 0) {
+        const next = remaining[0]
+        setActiveId(next.templateId)
+        setName(next.name)
+        setDesc(next.description ?? "")
+        setVars([])
+      } else {
+        onClose()
+      }
+    } catch(e) { alert('Erro ao eliminar: ' + e.message) }
+    finally { setDeleting(false) }
+  }
+
+  const activeTemplate = allTemplates.find(t => t.templateId === activeId)
   const scopeOrder = ["lob","language","project"]
   const grouped    = scopeOrder.map(s => ({ scope: s, vars: vars.filter(v => v.scope === s) }))
+
+  const SC = {
+    lob:      { label:"LOB",      bg:"bg-blue-50/40" },
+    language: { label:"Language", bg:"bg-amber-50/40" },
+    project:  { label:"Project",  bg:"bg-emerald-50/40" }
+  }
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col border border-gray-100">
 
+        {/* Header */}
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center text-white text-xs">∑</div>
@@ -863,116 +1001,304 @@ function TemplateModal({ template, vars, onSave, onClose, onNewTemplate, onEditV
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-
-          {/* Metadata */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Template</label>
-              <input value={name} onChange={e => setName(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
-                placeholder="Template Standard"/>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Descrição</label>
-              <input value={desc} onChange={e => setDesc(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
-                placeholder="Descrição opcional"/>
-            </div>
+        {/* Template navigator */}
+        <div className="px-6 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 shrink-0">
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide shrink-0">Template</span>
+          <div className="relative flex-1">
+            <select value={activeId ?? ''} onChange={e=>switchTemplate(e.target.value)}
+              disabled={loading}
+              className="w-full pl-3 pr-8 py-1.5 border border-gray-200 rounded-lg text-sm bg-white
+                         focus:outline-none focus:border-sky-400 appearance-none disabled:opacity-50">
+              {allTemplates.map(t=>(
+                <option key={t.templateId} value={t.templateId}>{t.name}</option>
+              ))}
+            </select>
+            <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none"
+                 viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+            </svg>
           </div>
-
-          {/* Variables by scope */}
-          {grouped.map(({ scope, vars: sv }) => (
-            <div key={scope}>
-              <div className="flex items-center gap-2 mb-2">
-                <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${SC[scope].badge}`}>{SC[scope].label}</span>
-                <span className="text-xs text-gray-400">{sv.length} variáve{sv.length !== 1 ? "is" : "l"}</span>
-              </div>
-              <div className={`rounded-xl border overflow-hidden ${SC[scope].bg}`}>
-                {sv.length === 0 && (
-                  <p className="px-4 py-3 text-xs text-gray-400 italic">Sem variáveis neste scope</p>
-                )}
-                {sv.map((v, i) => {
-                  const isInput = !v.formula && !v.alternatives?.length
-                  return (
-                    <div key={v.id}
-                      className={`flex items-center gap-3 px-4 py-2.5 ${i > 0 ? "border-t border-white/60" : ""}`}>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold text-sm text-gray-800">{v.name}</span>
-                          <span className="text-xs font-mono text-gray-400">{v.id}</span>
-                          {isInput
-                            ? <span className="text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-500">input</span>
-                            : v.alternatives?.length > 0
-                              ? <span className="text-xs bg-violet-50 px-1.5 py-0.5 rounded border border-violet-200 text-violet-600">{v.alternatives.length} alt.</span>
-                              : null
-                          }
-                        </div>
-                        {!isInput && v.formula && (
-                          <p className="text-xs font-mono text-gray-400 mt-0.5 truncate" title={v.formula}>{v.formula}</p>
-                        )}
-                      </div>
-                      <button onClick={() => onEditVar(v)}
-                        className="text-gray-300 hover:text-sky-500 text-sm w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white transition-all shrink-0">✎</button>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
-          <button onClick={onAddVar}
-            className="px-4 py-2 text-sm text-sky-600 hover:text-sky-800 font-semibold transition-colors">
-            + Adicionar variável
+          <button onClick={handleNew}
+            className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-medium shrink-0 transition-colors">
+            + Novo
           </button>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
-            <button onClick={() => onSave({ name: name.trim() || template.name, description: desc })}
-              className="px-5 py-2 bg-gray-900 text-white text-sm rounded-xl hover:bg-gray-700 transition-colors font-medium">
-              Guardar Template
+          {activeId && (
+            <button onClick={()=>setDeleting(true)}
+              className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium shrink-0 transition-colors">
+              Eliminar
             </button>
-          </div>
+          )}
         </div>
+
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center text-sm text-gray-400">A carregar...</div>
+        ) : !activeId ? (
+          <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Sem templates. Cria um novo.</div>
+        ) : (
+          <>
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {/* Metadata */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Template</label>
+                  <input value={name} onChange={e => setName(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
+                    placeholder="Template Standard"/>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Descrição</label>
+                  <input value={desc} onChange={e => setDesc(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
+                    placeholder="Descrição opcional"/>
+                </div>
+              </div>
+
+              {/* Scope badge + var count */}
+              <div className="flex items-center gap-3">
+                {grouped.filter(g=>g.vars.length>0).map(g=>(
+                  <span key={g.scope} className="text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded-lg border border-blue-100 font-medium">
+                    {SC[g.scope]?.label ?? g.scope}
+                  </span>
+                ))}
+                <span className="text-xs text-gray-400">
+                  {loadingVars ? 'A carregar variáveis...' : `${vars.length} variáveis`}
+                </span>
+              </div>
+
+              {/* Variables by scope */}
+              {loadingVars ? (
+                <div className="text-sm text-gray-400 text-center py-4">A carregar...</div>
+              ) : (
+                <div className="border border-gray-100 rounded-xl overflow-hidden">
+                  {grouped.filter(g=>g.vars.length>0).map(({ scope, vars: sv }) => (
+                    <div key={scope}>
+                      <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-100">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{SC[scope]?.label ?? scope}</span>
+                        <span className="text-xs text-gray-300">{sv.length}</span>
+                      </div>
+                      {sv.map(v => {
+                        const isInput = v.isInput
+                        return (
+                          <div key={v.id} className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 group">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-sm text-gray-800">{v.name}</span>
+                                <span className="text-xs font-mono text-gray-400">{v.id}</span>
+                                {isInput
+                                  ? <span className="text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-500">input</span>
+                                  : v.alternatives > 0
+                                    ? <span className="text-xs bg-violet-50 px-1.5 py-0.5 rounded border border-violet-200 text-violet-600">{v.alternatives} alt.</span>
+                                    : null
+                                }
+                              </div>
+                              {!isInput && v.formula && (
+                                <p className="text-xs font-mono text-gray-400 mt-0.5 truncate" title={v.formula}>{v.formula}</p>
+                              )}
+                            </div>
+                            <button onClick={() => onEditVar({
+                                id:           v.id,
+                                name:         v.name,
+                                scope:        v.scope,
+                                isInput:      v.isInput,
+                                formula:      v.formula,
+                                groupId:      v.groupId ?? null,
+                                alternatives: v.alternatives ? Array(v.alternatives).fill({trigger:'',formula:''}) : [],
+                                _apiId:       v._apiId,
+                                templateId:   activeId
+                              })}
+                              className="text-gray-300 hover:text-sky-500 text-sm w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white transition-all shrink-0 opacity-0 group-hover:opacity-100">✎</button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ))}
+                  {vars.length === 0 && !loadingVars && (
+                    <p className="text-sm text-gray-400 text-center py-6">Sem variáveis. Adiciona a primeira.</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
+              <button onClick={()=>onAddVar(activeId)}
+                className="px-4 py-2 text-sm text-sky-600 hover:text-sky-800 font-semibold transition-colors">
+                + Adicionar variável
+              </button>
+              <div className="flex gap-2">
+                <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+                <button onClick={handleSave} disabled={saving||!name.trim()}
+                  className="px-5 py-2 bg-gray-900 text-white text-sm rounded-xl hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium">
+                  {saving ? 'A guardar...' : 'Guardar Template'}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
+
+      {/* Delete confirm */}
+      {deleting && (
+        <>
+          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setDeleting(false)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
+            <p className="font-semibold text-gray-800 mb-1">Eliminar template?</p>
+            <p className="text-sm text-gray-400 mb-5 truncate">{activeTemplate?.name}</p>
+            <div className="flex gap-3">
+              <button onClick={()=>setDeleting(false)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={handleDelete}
+                className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">
+                Eliminar
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   PROJECT MODAL — nome do projecto, template associado, línguas e LOBs
-   ═══════════════════════════════════════════════════════════════ */
 
-function ProjectModal({ project, templates, onSave, onClose }) {
-  const [name,       setName]       = useState(project.name)
-  const [templateId, setTemplateId] = useState(project.templateId)
-  const [langs,      setLangs]      = useState(() =>
-    project.languages.map(l => ({ ...l, lobs: l.lobs.map(b => ({ ...b })) }))
+/* ═══════════════════════════════════════════════════════════════
+   PROJECT LIST PANEL + PROJECT MODAL
+   ═══════════════════════════════════════════════════════════════ */
+function ProjectListPanel({ allProjects, templates, onEdit, onCreate, onDelete, onClose }) {
+  const [confirmDelete, setConfirmDelete] = useState(null)
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50" onClick={onClose}/>
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50
+                      bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col border border-gray-100">
+
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
+            <h2 className="font-bold text-gray-800">Projectos</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onCreate}
+              className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold transition-colors">
+              + Novo
+            </button>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {allProjects.map(p => {
+            const tpl = templates.find(t => t.id === `tpl_${p.templateId}`)
+            return (
+              <div key={p.projectId}
+                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors">
+                <div className="flex-1 min-w-0">
+                  <span className="font-semibold text-sm text-gray-800 truncate block">{p.name}</span>
+                  <p className="text-xs text-gray-400 mt-0.5 truncate">Template: {tpl?.name ?? `#${p.templateId}`}</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button onClick={()=>onEdit(p.projectId)}
+                    className="text-xs px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-lg font-medium transition-colors">
+                    Editar
+                  </button>
+                  <button onClick={()=>setConfirmDelete(p)}
+                    className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium transition-colors">
+                    Eliminar
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+          {allProjects.length === 0 && (
+            <p className="text-sm text-gray-400 text-center py-8">Sem projectos criados.</p>
+          )}
+        </div>
+      </div>
+
+      {confirmDelete && (
+        <>
+          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setConfirmDelete(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
+            <p className="font-semibold text-gray-800 mb-1">Eliminar projecto?</p>
+            <p className="text-sm text-gray-400 mb-1 truncate">{confirmDelete.name}</p>
+            <p className="text-xs text-red-400 mb-5">Todas as versões e células serão eliminadas.</p>
+            <div className="flex gap-3">
+              <button onClick={()=>setConfirmDelete(null)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={()=>{ onDelete(confirmDelete.projectId); setConfirmDelete(null) }}
+                className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">
+                Eliminar
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
   )
-  const [expandedLangs, setExpandedLangs] = useState(new Set(project.languages.map(l => l.id)))
-  const [errors, setErrors]               = useState({})
+}
+
+function ProjectModal({ project, templates: templatesProp, isNew, onSave, onClose }) {
+  const [name,       setName]       = useState(project?.name ?? '')
+  const [templateId, setTemplateId] = useState(project?.templateId ?? '')
+  const [langs,      setLangs]      = useState(() =>
+    (project?.languages ?? []).map(l => ({ ...l, lobs: (l.lobs ?? []).map(b => ({ ...b })) }))
+  )
+  const [expandedLangs, setExpandedLangs] = useState(new Set((project?.languages ?? []).map(l => l.id)))
+  const [errors,   setErrors]   = useState({})
+  const [templates, setTemplates] = useState(templatesProp ?? [])
+  const [loadingStruct, setLoadingStruct] = useState(false)
   const idCtr = useRef(1000)
   const newId  = prefix => `${prefix}_${String(idCtr.current++).padStart(3,"0")}`
 
-  const templateChanged = templateId !== project.templateId
+  // Load templates from API if not provided
+  useEffect(() => {
+    if (!templatesProp?.length) {
+      api.get('/admin/templates')
+        .then(tpls => setTemplates(tpls.map(t => ({ id: `tpl_${t.templateId}`, name: t.name }))))
+        .catch(e => console.error(e))
+    }
+  }, [])
+
+  // Load project structure from API for non-active projects
+  useEffect(() => {
+    if (!isNew && project?.id && (!project.languages || project.languages.length === 0)) {
+      const rawId = parseInt((project.id ?? '').replace('c_',''))
+      if (!rawId) return
+      setLoadingStruct(true)
+      api.get(`/projects/${rawId}/structure`)
+        .then(data => {
+          const ls = (data.languages ?? []).map(l => ({
+            id: `l_${l.languageId}`, code: l.code, name: l.name,
+            lobs: (l.lobs ?? []).map(b => ({ id: `b_${b.lobId}`, code: b.code, name: b.name }))
+          }))
+          setLangs(ls)
+          setExpandedLangs(new Set(ls.map(l => l.id)))
+        })
+        .catch(e => console.error('Load structure:', e))
+        .finally(() => setLoadingStruct(false))
+    }
+  }, [project?.id])
+
+  const templateChanged = templateId !== project?.templateId
   const selectedTpl     = templates.find(t => t.id === templateId)
 
-  // Language ops
   const addLang    = () => { const id=newId("l"); setLangs(p=>[...p,{id,code:"",name:"",lobs:[]}]); setExpandedLangs(p=>new Set([...p,id])) }
   const removeLang = id => { setLangs(p=>p.filter(l=>l.id!==id)); setExpandedLangs(p=>{const n=new Set(p);n.delete(id);return n}) }
   const updateLang = (id,f,v) => setLangs(p=>p.map(l=>l.id===id?{...l,[f]:v}:l))
   const toggleLang = id => setExpandedLangs(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n})
-
-  // LOB ops
   const addLob    = lid => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:[...l.lobs,{id:newId("b"),code:"",name:""}]}:l))
   const removeLob = (lid,bid) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.filter(b=>b.id!==bid)}:l))
   const updateLob = (lid,bid,f,v) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.map(b=>b.id===bid?{...b,[f]:v}:b)}:l))
 
   const validate = () => {
     const e = {}
-    if (!name.trim())       e.name = "Obrigatório"
-    if (!templateId)        e.tpl  = "Selecciona um template"
+    if (!name.trim())  e.name = "Obrigatório"
+    if (!templateId)   e.tpl  = "Selecciona um template"
     langs.forEach((l,li) => {
       if (!l.code.trim()) e[`lc${li}`] = "Obrigatório"
       if (!l.name.trim()) e[`ln${li}`] = "Obrigatório"
@@ -984,7 +1310,7 @@ function ProjectModal({ project, templates, onSave, onClose }) {
     setErrors(e); return Object.keys(e).length === 0
   }
 
-  const handleSave = () => { if (validate()) onSave({ ...project, name:name.trim(), templateId, languages:langs }) }
+  const handleSave = () => { if (validate()) onSave({ ...(project ?? {}), name:name.trim(), templateId, languages:langs }) }
 
   const inp = (val, onChange, placeholder, ek, cls="") => (
     <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
@@ -992,9 +1318,8 @@ function ProjectModal({ project, templates, onSave, onClose }) {
         ${errors[ek]?"border-red-300":"border-gray-200"} ${cls}`}/>
   )
 
-  // Detect removed langs/lobs (for warning)
-  const removedLangs = project.languages.filter(l=>!langs.find(nl=>nl.id===l.id)).length
-  const removedLobs  = project.languages.flatMap(l=>l.lobs).filter(b=>!langs.flatMap(l=>l.lobs).find(nb=>nb.id===b.id)).length
+  const removedLangs = (project?.languages ?? []).filter(l=>!langs.find(nl=>nl.id===l.id)).length
+  const removedLobs  = (project?.languages ?? []).flatMap(l=>l.lobs ?? []).filter(b=>!langs.flatMap(l=>l.lobs).find(nb=>nb.id===b.id)).length
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1002,15 +1327,19 @@ function ProjectModal({ project, templates, onSave, onClose }) {
 
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
+            {!isNew && (
+              <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm flex items-center gap-1 hover:bg-gray-100 px-2 py-1 rounded-lg">
+                ← Lista
+              </button>
+            )}
             <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
-            <h2 className="font-bold text-gray-800">Configuração do Projecto</h2>
+            <h2 className="font-bold text-gray-800">{isNew ? 'Novo Projecto' : 'Configuração do Projecto'}</h2>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
 
-          {/* Nome + Template */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Projecto</label>
@@ -1021,108 +1350,81 @@ function ProjectModal({ project, templates, onSave, onClose }) {
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Template associado</label>
               <div className="relative">
                 <select value={templateId} onChange={e=>setTemplateId(e.target.value)}
-                  className={`w-full border rounded-lg pl-3 pr-8 py-2 text-sm outline-none focus:border-sky-400 bg-white appearance-none cursor-pointer
+                  className={`w-full border rounded-lg pl-3 pr-8 py-2 text-sm outline-none focus:border-sky-400 bg-white appearance-none
                     ${errors.tpl?"border-red-300":"border-gray-200"}`}>
                   <option value="">— selecciona —</option>
                   {templates.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
                 <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
               </div>
-              {selectedTpl && (
-                <p className="text-xs text-gray-400 mt-1 truncate">{selectedTpl.vars.length} variáveis</p>
-              )}
               {errors.tpl && <p className="text-red-500 text-xs mt-1">{errors.tpl}</p>}
             </div>
           </div>
 
-          {/* Warning: template changed */}
-          {templateChanged && (
+          {templateChanged && !isNew && (
             <div className="flex gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
               <span className="text-amber-500 shrink-0">⚠</span>
-              <p className="text-sm text-amber-800">
-                Mudar o template irá repor todos os valores — as células actuais serão apagadas.
-              </p>
+              <p className="text-sm text-amber-800">Mudar o template irá repor todos os valores.</p>
             </div>
           )}
 
-          {/* Languages */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                Línguas ({langs.length})
-              </label>
-              <button onClick={addLang} className="text-xs font-semibold text-sky-600 hover:text-sky-800 transition-colors">
-                + Adicionar língua
-              </button>
-            </div>
+          {loadingStruct && (
+            <p className="text-sm text-gray-400 text-center py-4">A carregar estrutura...</p>
+          )}
 
-            <div className="space-y-2">
-              {langs.length === 0 && (
-                <p className="text-xs text-gray-400 italic px-4 py-3 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                  Sem línguas definidas. Adiciona pelo menos uma.
-                </p>
-              )}
-              {langs.map((lang, li) => (
-                <div key={lang.id} className="border border-gray-200 rounded-xl overflow-hidden">
-                  {/* Language header */}
-                  <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 cursor-pointer"
-                    onClick={()=>toggleLang(lang.id)}>
-                    <span className="text-gray-400 text-xs w-4 shrink-0">{expandedLangs.has(lang.id)?"▼":"▶"}</span>
-                    <div onClick={e=>e.stopPropagation()} className="w-20 shrink-0">
-                      {inp(lang.code, val=>updateLang(lang.id,"code",val.toUpperCase()), "PT", `lc${li}`)}
-                    </div>
-                    <span className="text-gray-300 shrink-0">—</span>
-                    <div className="flex-1" onClick={e=>e.stopPropagation()}>
-                      {inp(lang.name, val=>updateLang(lang.id,"name",val), "Português", `ln${li}`, "w-full")}
-                    </div>
-                    <span className="text-xs text-gray-400 shrink-0">{lang.lobs.length} LOB{lang.lobs.length!==1?"s":""}</span>
-                    <button onClick={e=>{e.stopPropagation();removeLang(lang.id)}}
-                      className="text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center rounded hover:bg-red-50 text-xs transition-colors shrink-0">✕</button>
-                  </div>
-                  {/* LOBs */}
-                  {expandedLangs.has(lang.id) && (
-                    <div className="px-4 py-3 bg-white space-y-2 border-t border-gray-100">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-gray-400 font-medium">LOBs</span>
-                        <button onClick={()=>addLob(lang.id)} className="text-xs text-sky-600 hover:text-sky-800 font-semibold transition-colors">+ Adicionar LOB</button>
-                      </div>
-                      {lang.lobs.length===0&&<p className="text-xs text-gray-400 italic py-1">Sem LOBs. Adiciona pelo menos um.</p>}
-                      {lang.lobs.map((lob,bi)=>(
-                        <div key={lob.id} className="flex items-center gap-2 pl-4">
-                          <span className="text-gray-300 text-xs shrink-0">●</span>
-                          <div className="w-24 shrink-0">
-                            {inp(lob.code, val=>updateLob(lang.id,lob.id,"code",val.toLowerCase()), "ret", `bc${li}${bi}`)}
-                          </div>
-                          <span className="text-gray-300 shrink-0">—</span>
-                          <div className="flex-1">
-                            {inp(lob.name, val=>updateLob(lang.id,lob.id,"name",val), "Retalho", `bn${li}${bi}`, "w-full")}
-                          </div>
-                          <button onClick={()=>removeLob(lang.id,lob.id)}
-                            className="text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center rounded hover:bg-red-50 text-xs transition-colors shrink-0">✕</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Warning: removed structure */}
           {(removedLangs > 0 || removedLobs > 0) && (
-            <div className="flex gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-              <span className="text-amber-500 shrink-0">⚠</span>
-              <p className="text-sm text-amber-800">
-                {[removedLangs>0&&`${removedLangs} língua${removedLangs>1?"s":""} removida${removedLangs>1?"s":""}`, removedLobs>0&&`${removedLobs} LOB${removedLobs>1?"s":""} removido${removedLobs>1?"s":""}`].filter(Boolean).join(" e ")}. Os valores correspondentes serão apagados ao guardar.
+            <div className="flex gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+              <span className="text-red-500 shrink-0">⚠</span>
+              <p className="text-sm text-red-800">
+                {removedLangs > 0 && `${removedLangs} língua(s)`}
+                {removedLangs > 0 && removedLobs > 0 && " e "}
+                {removedLobs > 0 && `${removedLobs} LOB(s)`}
+                {" removidos — os valores correspondentes serão apagados."}
               </p>
             </div>
           )}
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Línguas & LOBs</label>
+              <button onClick={addLang} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Língua</button>
+            </div>
+            {langs.map((l, li) => (
+              <div key={l.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border-b border-gray-100">
+                  <button onClick={()=>toggleLang(l.id)} className="text-gray-400 hover:text-gray-600 text-xs w-5">
+                    {expandedLangs.has(l.id) ? '▾' : '▸'}
+                  </button>
+                  {inp(l.code, v=>updateLang(l.id,'code',v), "Código", `lc${li}`, "w-20 font-mono")}
+                  {inp(l.name, v=>updateLang(l.id,'name',v), "Nome da língua", `ln${li}`, "flex-1")}
+                  <button onClick={()=>removeLang(l.id)} className="text-red-400 hover:text-red-600 text-lg leading-none ml-1">×</button>
+                </div>
+                {expandedLangs.has(l.id) && (
+                  <div className="p-3 space-y-2">
+                    {l.lobs.map((b, bi) => (
+                      <div key={b.id} className="flex items-center gap-2 pl-6">
+                        <span className="text-gray-300 text-xs">└</span>
+                        {inp(b.code, v=>updateLob(l.id,b.id,'code',v), "Cód.", `bc${li}${bi}`, "w-20 font-mono")}
+                        {inp(b.name, v=>updateLob(l.id,b.id,'name',v), "Nome do LOB", `bn${li}${bi}`, "flex-1")}
+                        <button onClick={()=>removeLob(l.id,b.id)} className="text-red-400 hover:text-red-600 text-lg leading-none">×</button>
+                      </div>
+                    ))}
+                    <button onClick={()=>addLob(l.id)} className="text-xs text-gray-400 hover:text-gray-600 pl-6 font-medium">+ LOB</button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {langs.length === 0 && (
+              <p className="text-sm text-gray-400 text-center py-3">Sem línguas. Adiciona a primeira.</p>
+            )}
+          </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-2 shrink-0">
+        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-3 shrink-0">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
-          <button onClick={handleSave} className="px-5 py-2 bg-sky-600 text-white text-sm rounded-xl hover:bg-sky-700 transition-colors font-medium">
-            Guardar Projecto
+          <button onClick={handleSave}
+            className="px-5 py-2 bg-sky-600 text-white text-sm rounded-xl hover:bg-sky-700 transition-colors font-semibold">
+            {isNew ? 'Criar Projecto' : 'Guardar Projecto'}
           </button>
         </div>
       </div>
@@ -1131,8 +1433,340 @@ function ProjectModal({ project, templates, onSave, onClose }) {
 }
 
 
-// Dropdown com checkboxes para selecção de múltiplas versões.
-// selectedIds é um array ordenado (a ordem de selecção determina a ordem das colunas).
+/* ═══════════════════════════════════════════════════════════════
+   VAR MODAL — criar / editar variável
+   ═══════════════════════════════════════════════════════════════ */
+function VarModal({ variable, variables, client, onSave, onClose, onDelete }) {
+  // variable = null (new) or { id, name, scope, isInput, formula, alternatives, groupId, _apiId, templateId }
+  const isNew  = !variable
+  const SCOPES = ['lob','language','project']
+
+  const [name,         setName]        = useState(variable?.name         ?? '')
+  const [code,         setCode]        = useState(variable?.id           ?? '')
+  const [scope,        setScope]       = useState(variable?.scope        ?? 'lob')
+  const [isInput,      setIsInput]     = useState(variable?.isInput      ?? false)
+  const [formula,      setFormula]     = useState(variable?.formula      ?? '')
+  const [groupId,      setGroupId]     = useState(variable?.groupId      ?? null)
+  const [altList,      setAltList]     = useState(() =>
+    (variable?.alternatives ?? []).map?.((a,i) => typeof a === 'object'
+      ? { ...a, _key: i }
+      : { trigger:'', formula:'', _key: i }
+    ) ?? []
+  )
+  const [groups,       setGroups]      = useState([])
+  const [errors,       setErrors]      = useState({})
+
+  // Load variable groups for the template
+  useEffect(() => {
+    const tplId = variable?.templateId ?? (client ? parseInt((client.templateId ?? '').replace('tpl_','')) : null)
+    if (!tplId) {
+      // Load all groups
+      api.get('/admin/groups')
+        .then(g => setGroups(g))
+        .catch(() => {})
+    } else {
+      api.get(`/admin/templates/${tplId}/groups`).catch(() => api.get('/admin/groups'))
+        .then(g => setGroups(Array.isArray(g) ? g : []))
+        .catch(() => {})
+    }
+  }, [])
+
+  const addAlt    = () => setAltList(p => [...p, { trigger:'', formula:'', _key: Date.now() }])
+  const removeAlt = k  => setAltList(p => p.filter(a => a._key !== k))
+  const updateAlt = (k,f,v) => setAltList(p => p.map(a => a._key===k ? {...a,[f]:v} : a))
+
+  const validate = () => {
+    const e = {}
+    if (!name.trim())  e.name  = 'Obrigatório'
+    if (!code.trim())  e.code  = 'Obrigatório'
+    if (!isInput && !formula.trim() && altList.length === 0) e.formula = 'Obrigatório para variáveis calculadas'
+    altList.forEach((a,i) => {
+      if (!a.trigger.trim()) e[`at${i}`] = 'Obrigatório'
+      if (!a.formula.trim()) e[`af${i}`] = 'Obrigatório'
+    })
+    setErrors(e)
+    return Object.keys(e).length === 0
+  }
+
+  const handleSave = () => {
+    if (!validate()) return
+    const saved = {
+      id:           code.trim(),
+      name:         name.trim(),
+      scope,
+      isInput,
+      formula:      isInput ? null : (formula.trim() || null),
+      groupId:      groupId ? parseInt(groupId) : null,
+      alternatives: isInput ? [] : altList.map(a => ({ trigger: a.trigger.trim(), formula: a.formula.trim() })),
+      _apiId:       variable?._apiId ?? null,
+      templateId:   variable?.templateId ?? null,
+    }
+    onSave(saved)
+  }
+
+  const inp = (val, onChange, placeholder, ek, cls='') => (
+    <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      className={`border rounded-xl px-3 py-2 text-sm outline-none focus:border-sky-400 bg-white transition-colors
+        ${errors[ek]?'border-red-300 bg-red-50':'border-gray-200'} ${cls}`}/>
+  )
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[55] p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col border border-gray-100">
+
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 bg-violet-600 rounded-lg flex items-center justify-center text-white text-xs">x</div>
+            <h2 className="font-bold text-gray-800">{isNew ? 'Nova Variável' : 'Editar Variável'}</h2>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+
+          {/* Name + Code */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome <span className="text-red-400">*</span></label>
+              {inp(name, setName, 'ex: Receita', 'name', 'w-full')}
+              {errors.name && <p className="text-red-500 text-xs mt-1">{errors.name}</p>}
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Código <span className="text-red-400">*</span></label>
+              {inp(code, setCode, 'ex: v_rec', 'code', 'w-full font-mono')}
+              {errors.code && <p className="text-red-500 text-xs mt-1">{errors.code}</p>}
+            </div>
+          </div>
+
+          {/* Scope + Input */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Âmbito</label>
+              <div className="relative">
+                <select value={scope} onChange={e=>setScope(e.target.value)}
+                  className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none">
+                  {SCOPES.map(s => <option key={s} value={s}>{s === 'lob' ? 'LOB' : s === 'language' ? 'Language' : 'Project'}</option>)}
+                </select>
+                <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+                </svg>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Grupo de variáveis</label>
+              <div className="relative">
+                <select value={groupId ?? ''} onChange={e=>setGroupId(e.target.value || null)}
+                  className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none">
+                  <option value="">— sem grupo —</option>
+                  {groups.map(g => <option key={g.groupId} value={g.groupId}>{g.name}</option>)}
+                </select>
+                <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          {/* Input toggle */}
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={isInput} onChange={e=>setIsInput(e.target.checked)}
+              className="w-4 h-4 accent-sky-600"/>
+            <span className="text-sm text-gray-700">Variável de input (valor introduzido pelo utilizador)</span>
+          </label>
+
+          {/* Formula */}
+          {!isInput && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+                Fórmula principal {altList.length === 0 && <span className="text-red-400">*</span>}
+              </label>
+              {inp(formula, setFormula, 'ex: v_rec - v_cus', 'formula', 'w-full font-mono')}
+              {errors.formula && <p className="text-red-500 text-xs mt-1">{errors.formula}</p>}
+            </div>
+          )}
+
+          {/* Alternatives */}
+          {!isInput && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Fórmulas alternativas</label>
+                <button onClick={addAlt} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Adicionar</button>
+              </div>
+              {altList.map((a, i) => (
+                <div key={a._key} className="grid grid-cols-[1fr_2fr_auto] gap-2 mb-2 items-start">
+                  <div>
+                    {inp(a.trigger, v=>updateAlt(a._key,'trigger',v), 'trigger (código)', `at${i}`, 'w-full font-mono')}
+                    {errors[`at${i}`] && <p className="text-red-500 text-xs mt-0.5">{errors[`at${i}`]}</p>}
+                  </div>
+                  <div>
+                    {inp(a.formula, v=>updateAlt(a._key,'formula',v), 'fórmula', `af${i}`, 'w-full font-mono')}
+                    {errors[`af${i}`] && <p className="text-red-500 text-xs mt-0.5">{errors[`af${i}`]}</p>}
+                  </div>
+                  <button onClick={()=>removeAlt(a._key)}
+                    className="text-red-400 hover:text-red-600 text-lg leading-none mt-1.5">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
+          <div>
+            {!isNew && onDelete && (
+              <button onClick={onDelete}
+                className="px-4 py-2 text-sm text-red-500 hover:text-red-700 font-medium">
+                Eliminar variável
+              </button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+            <button onClick={handleSave}
+              className="px-5 py-2 bg-violet-600 text-white text-sm rounded-xl hover:bg-violet-700 transition-colors font-semibold">
+              {isNew ? 'Criar variável' : 'Guardar'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+/* ── VersionMultiSelect ─────────────────────────────────────── */
+/* ── DictModal ──────────────────────────────────────────────── */
+function DictModal({ onClose, onLaunch }) {
+  const [sel, setSel] = useState("t01")
+  const d    = DICT[sel]
+  const test = TESTS.find(t => t.id === sel)
+  const rowCls = { i: "bg-white", c: "bg-gray-50 text-gray-400", x: "bg-orange-50" }
+  const rowDot = {
+    i: <span className="w-2 h-2 rounded-full bg-green-400 inline-block"/>,
+    c: null,
+    x: <span className="w-2 h-2 rounded-full bg-orange-400 inline-block"/>
+  }
+
+  if (!d) return null
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center">
+              <span className="text-white text-xs">📖</span>
+            </div>
+            <h2 className="font-bold text-gray-800 text-base">Guia de Testes</h2>
+            <span className="text-xs text-gray-400">— descrição detalhada e exemplos numéricos</span>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl transition-colors">×</button>
+        </div>
+
+        <div className="flex flex-1 overflow-hidden">
+          <div className="w-56 border-r border-gray-100 overflow-y-auto shrink-0 py-2">
+            {TESTS.map(t => (
+              <button key={t.id} onClick={() => setSel(t.id)}
+                className={`w-full text-left px-4 py-2.5 transition-colors border-l-2
+                  ${sel === t.id ? "border-sky-400 bg-sky-50 text-sky-700 font-semibold" : "border-transparent text-gray-500 hover:bg-gray-50 hover:text-gray-700"}`}>
+                <span className="text-xs font-mono block">{t.id.toUpperCase()}</span>
+                <span className="text-xs leading-tight">{t.label.split(" · ")[1]}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-6 space-y-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-mono font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200">{sel.toUpperCase()}</span>
+                </div>
+                <h3 className="text-lg font-bold text-gray-900">{test?.label.split(" · ")[1]}</h3>
+              </div>
+              <button onClick={() => onLaunch(sel)}
+                className="px-4 py-2 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 transition-colors font-semibold shrink-0 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-green-300 animate-pulse"/>
+                Lançar teste ↗
+              </button>
+            </div>
+
+            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">O que testa</p>
+              <p className="text-sm text-gray-700 leading-relaxed">{d.what}</p>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Fórmulas envolvidas</p>
+              <div className="space-y-1.5">
+                {d.formulas.map((f, i) => (
+                  <div key={i} className="bg-gray-900 text-emerald-400 font-mono text-sm px-4 py-2 rounded-lg">{f}</div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Como executar</p>
+              <ol className="space-y-1.5">
+                {d.steps.map((s, i) => (
+                  <li key={i} className="flex gap-3 text-sm text-gray-700">
+                    <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-700 font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">{i+1}</span>
+                    <span className="leading-relaxed">{s}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Exemplo numérico</p>
+                <span className="text-xs text-gray-400">— {d.ctx}</span>
+              </div>
+              <div className="rounded-xl overflow-hidden border border-gray-200">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Variável</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Antes</th>
+                      <th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Depois</th>
+                      <th className="px-3 py-2 w-8"/>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.rows.map((r, i) => (
+                      <tr key={i} className={`border-b border-gray-100 last:border-0 ${rowCls[r.t]}`}>
+                        <td className={`px-4 py-2 font-mono text-xs ${r.t==="c"?"text-gray-400":"text-gray-700"}`}>{r.l}</td>
+                        <td className={`px-4 py-2 text-right font-mono text-sm ${r.t==="c"?"text-gray-400":"text-gray-600"}`}>{r.b}</td>
+                        <td className={`px-4 py-2 text-right font-mono text-sm font-semibold ${r.t==="x"?"text-orange-700":r.t==="i"?"text-green-700":"text-gray-400"}`}>
+                          {r.t!=="c"&&r.b!==r.a ? r.a : <span className="font-normal text-gray-400">{r.a}</span>}
+                        </td>
+                        <td className="px-3 py-2 text-center">{rowDot[r.t]}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 flex items-center gap-4 text-xs text-gray-400">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-400 inline-block"/>Input a editar</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400 inline-block"/>Calculado que muda</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-gray-300 inline-block"/>Inalterado</span>
+                </div>
+              </div>
+            </div>
+
+            {d.note && (
+              <div className="flex gap-3 bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
+                <span className="text-amber-500 shrink-0 mt-0.5">💡</span>
+                <p className="text-sm text-amber-800 leading-relaxed">{d.note}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function VersionMultiSelect({ versions, selectedIds, onToggle, onClear }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -1155,7 +1789,6 @@ function VersionMultiSelect({ versions, selectedIds, onToggle, onClear }) {
       <button onClick={() => setOpen(p => !p)}
         className={`flex items-center gap-2 pl-3 pr-2.5 py-1.5 text-sm border rounded-xl bg-white transition-all min-w-52
           ${open ? "border-indigo-400 ring-2 ring-indigo-100" : "border-indigo-200 hover:border-indigo-300"}`}>
-        {/* color dots for selected versions */}
         <div className="flex items-center gap-0.5 shrink-0">
           {selectedIds.length === 0 && <span className="w-2 h-2 rounded-full bg-gray-300"/>}
           {selectedIds.slice(0, 5).map(id => {
@@ -1209,9 +1842,10 @@ function VersionMultiSelect({ versions, selectedIds, onToggle, onClear }) {
   )
 }
 
+/* ── VersionTab ─────────────────────────────────────────────── */
 function VersionTab({ ver, colorIdx, isActive, onSelect, onClone, onRename, onDelete, canDelete }) {
   const [renaming, setRenaming] = useState(false)
-  const [draft, setDraft] = useState(ver.name)
+  const [draft,    setDraft]    = useState(ver.name)
   const col = verColor(colorIdx)
 
   if (renaming) return (
@@ -1221,19 +1855,24 @@ function VersionTab({ ver, colorIdx, isActive, onSelect, onClone, onRename, onDe
         onChange={e => setDraft(e.target.value)}
         onBlur={() => { onRename(draft.trim() || ver.name); setRenaming(false) }}
         onKeyDown={e => {
-          if (e.key === "Enter") { onRename(draft.trim() || ver.name); setRenaming(false) }
+          if (e.key === "Enter")  { onRename(draft.trim() || ver.name); setRenaming(false) }
           if (e.key === "Escape") { setDraft(ver.name); setRenaming(false) }
         }}
       />
     </div>
   )
 
+  const lockBadge = ver.isLocked
+    ? <span className="text-[10px] text-amber-500 ml-0.5">🔒</span>
+    : null
+
   return (
     <div onClick={() => onSelect(ver.id)}
       className={`relative flex items-center gap-2 px-4 py-2.5 border-b-2 cursor-pointer transition-all whitespace-nowrap group select-none
         ${isActive ? `${col.active} font-semibold` : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-200"}`}>
-      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`} />
+      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`}/>
       <span className="text-sm">{ver.name}</span>
+      {lockBadge}
       {isActive && (
         <div className="flex items-center gap-0.5 ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <button title="Renomear" onClick={e => { e.stopPropagation(); setRenaming(true) }}
@@ -1250,116 +1889,8 @@ function VersionTab({ ver, colorIdx, isActive, onSelect, onClone, onRename, onDe
   )
 }
 
-/* ── Dictionary Modal/* ── Dictionary Modal ───────────────────────────────────────── */
 
-function DictModal({ onClose, onLaunch }) {
-  const [sel, setSel] = useState("t01")
-  const d = DICT[sel], test = TESTS.find(t => t.id === sel)
-  const rowCls = { i: "bg-white", c: "bg-gray-50", x: "bg-orange-50" }
-  const rowDot = { i: <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />, c: null, x: <span className="w-2 h-2 rounded-full bg-orange-400 inline-block" /> }
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col border border-gray-100">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3"><div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center"><span className="text-white text-xs">📖</span></div><h2 className="font-bold text-gray-800 text-base">Guia de Testes</h2></div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl transition-colors">×</button>
-        </div>
-        <div className="flex flex-1 overflow-hidden">
-          <div className="w-56 border-r border-gray-100 overflow-y-auto shrink-0 py-2">
-            {TESTS.map(t => (
-              <button key={t.id} onClick={() => setSel(t.id)} className={`w-full text-left px-4 py-2.5 transition-colors border-l-2 ${sel === t.id ? "border-sky-400 bg-sky-50 text-sky-700 font-semibold" : "border-transparent text-gray-500 hover:bg-gray-50 hover:text-gray-700"}`}>
-                <span className="text-xs font-mono block">{t.id.toUpperCase()}</span>
-                <span className="text-xs leading-tight">{t.label.split(" · ")[1]}</span>
-              </button>
-            ))}
-          </div>
-          <div className="flex-1 overflow-y-auto p-6 space-y-5">
-            <div className="flex items-start justify-between gap-4">
-              <div><div className="flex items-center gap-2 mb-1"><span className="text-xs font-mono font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200">{sel.toUpperCase()}</span></div><h3 className="text-lg font-bold text-gray-900">{test?.label.split(" · ")[1]}</h3></div>
-              <button onClick={() => onLaunch(sel)} className="px-4 py-2 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 transition-colors font-semibold shrink-0 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-green-300 animate-pulse"/>Lançar ↗</button>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100"><p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">O que testa</p><p className="text-sm text-gray-700 leading-relaxed">{d.what}</p></div>
-            <div><p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Fórmulas envolvidas</p><div className="space-y-1.5">{d.formulas.map((f, i) => <div key={i} className="bg-gray-900 text-emerald-400 font-mono text-sm px-4 py-2 rounded-lg">{f}</div>)}</div></div>
-            <div><p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Como executar</p><ol className="space-y-1.5">{d.steps.map((s, i) => (<li key={i} className="flex gap-3 text-sm text-gray-700"><span className="w-5 h-5 rounded-full bg-sky-100 text-sky-700 font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">{i + 1}</span><span className="leading-relaxed">{s}</span></li>))}</ol></div>
-            <div>
-              <div className="flex items-center gap-2 mb-2"><p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Exemplo numérico</p><span className="text-xs text-gray-400">— {d.ctx}</span></div>
-              <div className="rounded-xl overflow-hidden border border-gray-200">
-                <table className="w-full text-sm border-collapse">
-                  <thead><tr className="bg-gray-50 border-b border-gray-200"><th className="text-left px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Variável</th><th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Antes</th><th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Depois</th><th className="px-3 py-2 w-8" /></tr></thead>
-                  <tbody>{d.rows.map((r, i) => (<tr key={i} className={`border-b border-gray-100 last:border-0 ${rowCls[r.t]}`}><td className={`px-4 py-2 font-mono text-xs ${r.t === "c" ? "text-gray-400" : "text-gray-700"}`}>{r.l}</td><td className={`px-4 py-2 text-right font-mono text-sm ${r.t === "c" ? "text-gray-400" : "text-gray-600"}`}>{r.b}</td><td className={`px-4 py-2 text-right font-mono text-sm font-semibold ${r.t === "x" ? "text-orange-700" : r.t === "i" ? "text-green-700" : "text-gray-400"}`}>{r.t !== "c" && r.b !== r.a ? r.a : <span className="font-normal text-gray-400">{r.a}</span>}</td><td className="px-3 py-2 text-center">{rowDot[r.t]}</td></tr>))}</tbody>
-                </table>
-                <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 flex items-center gap-4 text-xs text-gray-400"><span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-400 inline-block"/>Input a editar</span><span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400 inline-block"/>Calculado que muda</span></div>
-              </div>
-            </div>
-            {d.note && (<div className="flex gap-3 bg-amber-50 border border-amber-100 rounded-xl px-4 py-3"><span className="text-amber-500 shrink-0 mt-0.5">💡</span><p className="text-sm text-amber-800 leading-relaxed">{d.note}</p></div>)}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ── Variable Modal ─────────────────────────────────────────── */
-
-function VarModal({ variable, variables, client: vClient, onSave, onClose, onDelete }) {
-  const cl = vClient ?? CLIENT   // fallback to module constant
-  const isNew = !variable
-  const [name, setName] = useState(variable?.name ?? "")
-  const [id, setId] = useState(variable?.id ?? "")
-  const [scope, setScope] = useState(variable?.scope ?? "lob")
-  const [isInput, setIsInput] = useState(!variable?.formula && !variable?.alternatives?.length)
-  const [formula, setFormula] = useState(variable?.formula ?? "")
-  const [alts, setAlts] = useState(variable?.alternatives ?? [])
-  const [defFm, setDefFm] = useState(variable?.defaultFormula ?? "")
-  const [errs, setErrs] = useState({})
-  const vf = f => { if (!f?.trim()) return "Vazia"; const r = tryParseValidate(f, cl); return r.ok ? null : r.err }
-  const save = () => {
-    const e = {}
-    if (!name.trim()) e.name = "Obrigatório"; if (!id.trim()) e.id = "Obrigatório"
-    if (isNew && variables.find(v => v.id === id)) e.id = "ID já existe"
-    if (!isInput) { if (!alts.length && formula) { const err = vf(formula); if (err) e.formula = err } alts.forEach((a, i) => { if (!a.trigger) e[`at${i}`] = "Trigger obrigatório"; if (a.formula) { const err = vf(a.formula); if (err) e[`af${i}`] = err } }); if (defFm) { const err = vf(defFm); if (err) e.defFm = err } }
-    if (Object.keys(e).length) { setErrs(e); return }
-    onSave({ id, name, scope, formula: isInput ? null : (alts.length ? null : formula || null), alternatives: isInput ? [] : alts, defaultFormula: isInput ? null : (defFm || null) })
-  }
-  const inputVars = variables.filter(v => !v.formula && !v.alternatives?.length && v.id !== id)
-  const fc = k => `w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:border-sky-400 transition-colors ${errs[k] ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col border border-gray-100">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between"><h2 className="font-semibold text-gray-800">{isNew ? "Nova Variável" : `Editar · ${variable.name}`}</h2><button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-lg transition-colors">×</button></div>
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome</label><input className={fc("name")} value={name} onChange={e => setName(e.target.value)} placeholder="Receita"/>{errs.name && <p className="text-red-500 text-xs mt-1">{errs.name}</p>}</div>
-            <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">ID</label><input className={`${fc("id")} font-mono`} value={id} onChange={e => isNew && setId(e.target.value)} style={{ opacity: isNew ? 1 : 0.6 }} readOnly={!isNew} placeholder="v_receita"/>{errs.id && <p className="text-red-500 text-xs mt-1">{errs.id}</p>}</div>
-          </div>
-          <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Âmbito</label><div className="flex gap-2">{["lob","language","project"].map(s => (<button key={s} onClick={() => setScope(s)} className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${scope === s ? SC[s].badge + " ring-2 ring-current ring-offset-1" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}>{SC[s].label}</button>))}</div></div>
-          <div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Tipo</label><div className="flex rounded-lg overflow-hidden border border-gray-200 w-fit">{[[true,"Input manual"],[false,"Calculado"]].map(([v,l]) => (<button key={l} onClick={() => setIsInput(v)} className={`px-4 py-1.5 text-sm font-medium transition-all ${isInput === v ? "bg-gray-800 text-white" : "bg-white text-gray-500 hover:bg-gray-50"}`}>{l}</button>))}</div></div>
-          {!isInput && (<div className="space-y-3">
-            {!alts.length ? (<div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Fórmula</label><input className={`${fc("formula")} font-mono`} value={formula} onChange={e => setFormula(e.target.value)} placeholder="v_rec - v_cus"/>{errs.formula ? <p className="text-red-500 text-xs mt-1">{errs.formula}</p> : formula && tryParseValidate(formula, cl).ok ? <p className="text-emerald-600 text-xs mt-1 font-medium">✓ Válida</p> : formula ? <p className="text-red-500 text-xs mt-1">{tryParseValidate(formula, cl).err}</p> : null}</div>)
-            : (<div className="space-y-2.5"><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block">Fórmulas Alternativas</label>{alts.map((a,i)=>(<div key={i} className="bg-violet-50 border border-violet-100 rounded-xl p-3.5 space-y-2"><div className="flex items-center gap-2"><span className="text-violet-500 font-bold">@</span><select value={a.trigger} onChange={e=>setAlts(prev=>prev.map((x,j)=>j===i?{...x,trigger:e.target.value}:x))} className={`flex-1 border rounded-lg px-2.5 py-1.5 text-sm bg-white outline-none ${errs[`at${i}`]?"border-red-300":"border-gray-200"}`}><option value="">— trigger —</option>{inputVars.map(v=><option key={v.id} value={v.id}>{v.name} ({v.id})</option>)}</select><span className="text-gray-400 font-bold">:</span><button onClick={()=>setAlts(prev=>prev.filter((_,j)=>j!==i))} className="text-red-400 hover:text-red-600 w-6 h-6 flex items-center justify-center text-xs transition-colors">✕</button></div><input value={a.formula} onChange={e=>setAlts(prev=>prev.map((x,j)=>j===i?{...x,formula:e.target.value}:x))} className={`w-full border rounded-lg px-3 py-1.5 text-sm font-mono bg-white outline-none ${errs[`af${i}`]?"border-red-300":"border-gray-200"}`} placeholder="fórmula para este trigger"/>{errs[`at${i}`]&&<p className="text-red-500 text-xs">{errs[`at${i}`]}</p>}{errs[`af${i}`]?<p className="text-red-500 text-xs">{errs[`af${i}`]}</p>:a.formula&&tryParseValidate(a.formula,cl).ok?<p className="text-emerald-600 text-xs font-medium">✓ Válida</p>:a.formula?<p className="text-red-500 text-xs">{tryParseValidate(a.formula,cl).err}</p>:null}</div>))}<div><label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Por defeito</label><input className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-mono outline-none" value={defFm} onChange={e=>setDefFm(e.target.value)} placeholder="0"/></div></div>)}
-            <button onClick={()=>{setAlts(prev=>[...prev,{trigger:"",formula:""}]);setFormula("")}} className="text-violet-600 hover:text-violet-800 text-xs font-semibold transition-colors">+ Adicionar alternativa (@)</button>
-          </div>)}
-          <div className="bg-gray-50 rounded-xl p-4 text-xs text-gray-500 space-y-1.5 border border-gray-100">
-            <p className="font-semibold text-gray-700 mb-2">Referência rápida</p>
-            {[["v_xxx","referência relativa (contexto actual)"],["v_xxx[PT]","língua PT, LOB relativo"],["v_xxx[PT][ret]","língua PT, LOB Retalho — absoluto"],["v_xxx[*][ret]","língua relativa, LOB Retalho — absoluto"],["PREV(v_xxx[PT][ret])","PREV com contexto absoluto"],["SUM_LOBS(v_xxx[PT])","soma LOBs de PT — língua fixa"],["SUM_LANGS(v_xxx)","soma todas as línguas"],["+ − * /  ( )","operadores"]].map(([c,d])=>(<p key={c}><code className="bg-gray-200 px-1.5 py-0.5 rounded font-mono">{c}</code> <span className="text-gray-400 ml-1">{d}</span></p>))}
-            {variables.filter(v => v.id !== id).length > 0 && (<div className="mt-3 pt-3 border-t border-gray-200"><p className="font-semibold text-gray-600 mb-1.5">Disponíveis:</p><div className="flex flex-wrap gap-1">{variables.filter(v=>v.id!==id).map(v=>(<span key={v.id} className="inline-flex gap-1"><code className="bg-gray-200 px-1 rounded font-mono text-gray-700">{v.id}</code><span className="text-gray-400">{v.name}</span></span>))}</div></div>)}
-          </div>
-        </div>
-        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between"><div>{!isNew && onDelete && <button onClick={onDelete} className="text-red-400 hover:text-red-600 text-sm transition-colors">Eliminar</button>}</div><div className="flex gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button><button onClick={save} className="px-5 py-2 bg-gray-900 text-white text-sm rounded-xl hover:bg-gray-700 transition-colors font-medium">Guardar</button></div></div>
-      </div>
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   MAIN APP
-   ═══════════════════════════════════════════════════════════════ */
-
-
-/* ═══════════════════════════════════════════════════════════════
-   HAMBURGER MENU
-   ═══════════════════════════════════════════════════════════════ */
-function HamburgerMenu({ open, onClose, onTemplate, onProject, onDict }) {
+function HamburgerMenu({ open, onClose, onTemplate, onProject, onDict, onAdmin }) {
   if (!open) return null
   return (
     <>
@@ -1379,12 +1910,17 @@ function HamburgerMenu({ open, onClose, onTemplate, onProject, onDict }) {
           <button onClick={()=>{onTemplate();onClose()}}
             className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
             <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">∑</span>
-            Template
+            Templates
           </button>
           <button onClick={()=>{onProject();onClose()}}
             className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
             <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">🏢</span>
-            Projecto
+            Projectos
+          </button>
+          <button onClick={()=>{onAdmin();onClose()}}
+            className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
+            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">⚙️</span>
+            Tipos de Versão e Grupos
           </button>
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 py-2 mt-2">Ferramentas</p>
           <button onClick={()=>{onDict();onClose()}}
@@ -1410,7 +1946,9 @@ function GridFilters({
   filterType,  setFilterType,
   filterLang,  setFilterLang,
   filterLob,   setFilterLob,
-  filterVar,   setFilterVar
+  filterVar,   setFilterVar,
+  filterGroup, setFilterGroup,
+  availableGroups
 }) {
   const langs = project.languages ?? []
   const selectedLang = langs.find(l => l.code === filterLang)
@@ -1423,8 +1961,8 @@ function GridFilters({
     if (val === 'language') { setFilterLob('') }
   }
 
-  const hasFilters = filterScope || filterType || filterLang || filterLob || filterVar
-  const clearAll   = () => { setFilterScope(''); setFilterType(''); setFilterLang(''); setFilterLob(''); setFilterVar('') }
+  const hasFilters = filterScope || filterType || filterLang || filterLob || filterVar || filterGroup
+  const clearAll   = () => { setFilterScope(''); setFilterType(''); setFilterLang(''); setFilterLob(''); setFilterVar(''); if(setFilterGroup) setFilterGroup('') }
 
   const scopeLabel = { template: 'Projecto', language: 'Língua', lob: 'LOB' }
 
@@ -1484,6 +2022,18 @@ function GridFilters({
         className={`text-xs px-3 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 w-36 transition-colors
           ${filterVar ? 'border-amber-300 text-amber-700 bg-amber-50' : 'border-gray-200 text-gray-700'}`}/>
 
+      {/* Grupo */}
+      {availableGroups?.length > 0 && (
+        <select value={filterGroup||''} onChange={e=>setFilterGroup&&setFilterGroup(e.target.value)}
+          className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
+            ${filterGroup ? 'border-teal-300 text-teal-700 bg-teal-50' : 'border-gray-200 text-gray-700'}`}>
+          <option value="">Todos os grupos</option>
+          {availableGroups.map(g=>(
+            <option key={g.id} value={g.id}>{g.name}</option>
+          ))}
+        </select>
+      )}
+
       {/* Tags activas */}
       {filterType === 'input'      && <span className="text-xs px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded-full font-medium">✎ Inputs</span>}
       {filterType === 'calculated' && <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full font-medium">∑ Calculadas</span>}
@@ -1491,6 +2041,7 @@ function GridFilters({
       {filterLang  && <span className="text-xs px-2 py-0.5 bg-sky-100 text-sky-700 rounded-full font-medium">{filterLang}</span>}
       {filterLob   && <span className="text-xs px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full font-medium">{filterLob}</span>}
       {filterVar   && <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full font-medium">"{filterVar}"</span>}
+      {filterGroup && availableGroups && <span className="text-xs px-2 py-0.5 bg-teal-100 text-teal-700 rounded-full font-medium">{availableGroups.find(g=>g.id===filterGroup)?.name ?? filterGroup}</span>}
 
       {hasFilters && (
         <button onClick={clearAll}
@@ -1704,6 +2255,671 @@ function DeltaLogModal({ entries, onClose }) {
 }
 
 
+
+/* ═══════════════════════════════════════════════════════════════
+   NOVA VERSÃO MODAL
+   ═══════════════════════════════════════════════════════════════ */
+function NewVersionModal({ versionTypes, name, setName, typeId, setTypeId, onConfirm, onCancel }) {
+  const canConfirm = name.trim().length > 0 && typeId != null
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/30 z-50" onClick={onCancel}/>
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50
+                      bg-white rounded-2xl shadow-2xl border border-gray-200 w-full max-w-sm p-6">
+        <h2 className="text-base font-bold text-gray-900 mb-5">Nova versão</h2>
+        <div className="flex flex-col gap-4">
+          {/* Nome */}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+              Nome
+            </label>
+            <input
+              autoFocus
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && canConfirm && onConfirm()}
+              className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm
+                         focus:outline-none focus:border-sky-400"
+              placeholder="Nome da versão"/>
+          </div>
+          {/* Tipo */}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
+              Tipo <span className="text-red-400">*</span>
+            </label>
+            <div className="relative">
+              <select
+                value={typeId ?? ""}
+                onChange={e => setTypeId(parseInt(e.target.value) || null)}
+                className="w-full pl-3 pr-8 py-2 border border-gray-300 rounded-xl text-sm
+                           focus:outline-none focus:border-sky-400 appearance-none bg-white">
+                <option value="">— seleciona —</option>
+                {versionTypes.map(t => (
+                  <option key={t.versionTypeId} value={t.versionTypeId}>
+                    {t.name}{t.isLocked ? " 🔒" : ""}
+                  </option>
+                ))}
+              </select>
+              <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"
+                   viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+              </svg>
+            </div>
+            {typeId && versionTypes.find(t=>t.versionTypeId===typeId)?.isLocked && (
+              <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+                🔒 Este tipo bloqueia edição de células
+              </p>
+            )}
+          </div>
+        </div>
+        {/* Buttons */}
+        <div className="flex gap-3 mt-6">
+          <button onClick={onCancel}
+            className="flex-1 px-4 py-2 border border-gray-300 text-gray-600 rounded-xl text-sm font-medium hover:bg-gray-50">
+            Cancelar
+          </button>
+          <button onClick={onConfirm} disabled={!canConfirm}
+            className={`flex-1 px-4 py-2 rounded-xl text-sm font-semibold transition-colors
+              ${canConfirm ? "bg-sky-600 text-white hover:bg-sky-700" : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}>
+            Criar versão
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
+
+
+
+/* ═══════════════════════════════════════════════════════════════
+   ADMIN PANEL — CRUD independente de 4 tabelas
+   Não depende do estado da app principal (projecto activo, etc.)
+   ═══════════════════════════════════════════════════════════════ */
+
+// ── Generic helpers ──────────────────────────────────────────
+function AdminField({ label, required, children }) {
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+        {label}{required && <span className="text-red-400 ml-0.5">*</span>}
+      </label>
+      {children}
+    </div>
+  )
+}
+
+function AdminInput({ value, onChange, placeholder, mono, type="text", ...rest }) {
+  return (
+    <input type={type} value={value ?? ''} onChange={e=>onChange(e.target.value)}
+      placeholder={placeholder}
+      className={`w-full px-3 py-2 border border-gray-200 rounded-xl text-sm bg-white
+                  focus:outline-none focus:border-sky-400 transition-colors
+                  ${mono ? 'font-mono' : ''}`}
+      {...rest}/>
+  )
+}
+
+function AdminSelect({ value, onChange, children }) {
+  return (
+    <div className="relative">
+      <select value={value ?? ''} onChange={e=>onChange(e.target.value)}
+        className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white
+                   focus:outline-none focus:border-sky-400 appearance-none transition-colors">
+        {children}
+      </select>
+      <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"
+           viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+      </svg>
+    </div>
+  )
+}
+
+function AdminTable({ cols, rows, onEdit, onDelete }) {
+  if (!rows.length) return (
+    <p className="text-sm text-gray-400 text-center py-10">Sem registos.</p>
+  )
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-gray-100">
+          {cols.map(c => (
+            <th key={c.key} className="pb-2 pr-4 text-left text-xs font-semibold text-gray-400 uppercase tracking-wide">
+              {c.label}
+            </th>
+          ))}
+          <th className="pb-2 w-24"/>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, i) => (
+          <tr key={i} className="border-b border-gray-50 hover:bg-gray-50 group transition-colors">
+            {cols.map(c => (
+              <td key={c.key} className="py-2.5 pr-4">
+                {c.render ? c.render(row) : <span className={c.mono ? 'font-mono text-xs text-gray-500' : 'text-gray-800'}>{row[c.key]}</span>}
+              </td>
+            ))}
+            <td className="py-2.5">
+              <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button onClick={() => onEdit(row)}
+                  className="text-xs text-sky-600 hover:text-sky-800 font-medium">Editar</button>
+                <button onClick={() => onDelete(row)}
+                  className="text-xs text-red-500 hover:text-red-700 font-medium">Eliminar</button>
+              </div>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function AdminDeleteModal({ label, onConfirm, onCancel }) {
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/20 z-[70]" onClick={onCancel}/>
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[70]
+                      bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
+        <p className="font-semibold text-gray-800 mb-1">Eliminar registo?</p>
+        <p className="text-sm text-gray-500 mb-5 truncate">{label}</p>
+        <div className="flex gap-3">
+          <button onClick={onCancel}
+            className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+            Cancelar
+          </button>
+          <button onClick={onConfirm}
+            className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">
+            Eliminar
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Tab: Tipos de Versão ─────────────────────────────────────
+function VersionTypesTab() {
+  const [items,   setItems]   = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState(null)
+  const [editing, setEditing] = useState(null)   // null | {} | item
+  const [deleting,setDeleting]= useState(null)
+  const [saving,  setSaving]  = useState(false)
+  const blank = { code:'', name:'', isLocked: false, sortOrder: 1 }
+
+  useEffect(() => {
+    api.get('/admin/version-types')
+      .then(setItems)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const openNew  = () => setEditing({ ...blank, sortOrder: items.length + 1 })
+  const openEdit = item => setEditing({ ...item })
+
+  const save = async () => {
+    if (!editing.code.trim() || !editing.name.trim()) return
+    setSaving(true)
+    try {
+      if (editing.versionTypeId) {
+        const u = await api.put(`/admin/version-types/${editing.versionTypeId}`, editing)
+        setItems(p => p.map(x => x.versionTypeId === u.versionTypeId ? u : x))
+      } else {
+        const c = await api.post('/admin/version-types', editing)
+        setItems(p => [...p, c])
+      }
+      setEditing(null)
+    } catch(e) { alert(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const confirmDelete = async () => {
+    try {
+      await api.delete(`/admin/version-types/${deleting.versionTypeId}`)
+      setItems(p => p.filter(x => x.versionTypeId !== deleting.versionTypeId))
+    } catch(e) { alert(e.message) }
+    finally { setDeleting(null) }
+  }
+
+  if (loading) return <p className="text-sm text-gray-400 text-center py-10">A carregar...</p>
+  if (error)   return <p className="text-sm text-red-500 text-center py-10">{error}</p>
+
+  const cols = [
+    { key:'code',      label:'Código',   mono:true },
+    { key:'name',      label:'Nome' },
+    { key:'sortOrder', label:'Ordem',    render: r => <span className="text-gray-400 text-xs">{r.sortOrder}</span> },
+    { key:'isLocked',  label:'Bloqueado',render: r => r.isLocked
+        ? <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-700 rounded-lg">🔒 Sim</span>
+        : <span className="text-xs text-gray-300">—</span> },
+  ]
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <button onClick={openNew}
+          className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-xl transition-colors">
+          + Novo tipo
+        </button>
+      </div>
+      <AdminTable cols={cols} rows={items} onEdit={openEdit} onDelete={setDeleting}/>
+      {editing && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-[60]" onClick={() => setEditing(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-full max-w-sm p-6">
+            <h3 className="font-bold text-gray-900 mb-5 text-sm">
+              {editing.versionTypeId ? 'Editar tipo' : 'Novo tipo'}
+            </h3>
+            <div className="flex flex-col gap-4">
+              <AdminField label="Código" required>
+                <AdminInput value={editing.code} onChange={v=>setEditing(p=>({...p,code:v}))} placeholder="ex: budget" mono/>
+              </AdminField>
+              <AdminField label="Nome" required>
+                <AdminInput value={editing.name} onChange={v=>setEditing(p=>({...p,name:v}))} placeholder="ex: Budget"
+                  onKeyDown={e=>e.key==='Enter'&&save()}/>
+              </AdminField>
+              <AdminField label="Ordem">
+                <AdminInput type="number" value={editing.sortOrder}
+                  onChange={v=>setEditing(p=>({...p,sortOrder:parseInt(v)||0}))}/>
+              </AdminField>
+              <label className="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" checked={editing.isLocked||false}
+                  onChange={e=>setEditing(p=>({...p,isLocked:e.target.checked}))}
+                  className="w-4 h-4 accent-amber-500"/>
+                <span className="text-sm text-gray-700">Bloquear edição de células</span>
+              </label>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button onClick={()=>setEditing(null)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={save} disabled={!editing.code.trim()||!editing.name.trim()||saving}
+                className="flex-1 px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white rounded-xl text-sm font-semibold">
+                {saving ? 'A guardar...' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {deleting && <AdminDeleteModal label={deleting.name} onConfirm={confirmDelete} onCancel={()=>setDeleting(null)}/>}
+    </div>
+  )
+}
+
+// ── Tab: Grupos de Variáveis ─────────────────────────────────
+function VariableGroupsTab() {
+  const [items,     setItems]     = useState([])
+  const [templates, setTemplates] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [error,     setError]     = useState(null)
+  const [editing,   setEditing]   = useState(null)
+  const [deleting,  setDeleting]  = useState(null)
+  const [saving,    setSaving]    = useState(false)
+
+  useEffect(() => {
+    Promise.all([api.get('/admin/groups'), api.get('/admin/templates')])
+      .then(([grps, tpls]) => { setItems(grps); setTemplates(tpls) })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const openNew  = () => setEditing({ code:'', name:'', sortOrder: items.length+1, templateId: templates[0]?.templateId ?? null })
+  const openEdit = item => setEditing({ ...item })
+
+  const save = async () => {
+    if (!editing.code.trim() || !editing.name.trim() || !editing.templateId) return
+    setSaving(true)
+    try {
+      if (editing.groupId) {
+        await api.put(`/admin/groups/${editing.groupId}`, editing)
+      } else {
+        await api.post('/admin/groups', editing)
+      }
+      const grps = await api.get('/admin/groups')
+      setItems(grps)
+      setEditing(null)
+    } catch(e) { alert(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const confirmDelete = async () => {
+    try {
+      await api.delete(`/admin/groups/${deleting.groupId}`)
+      setItems(p => p.filter(x => x.groupId !== deleting.groupId))
+    } catch(e) { alert(e.message) }
+    finally { setDeleting(null) }
+  }
+
+  if (loading) return <p className="text-sm text-gray-400 text-center py-10">A carregar...</p>
+  if (error)   return <p className="text-sm text-red-500 text-center py-10">{error}</p>
+
+  const cols = [
+    { key:'templateName', label:'Template' },
+    { key:'code',         label:'Código',    mono:true },
+    { key:'name',         label:'Nome' },
+    { key:'sortOrder',    label:'Ordem',     render: r => <span className="text-gray-400 text-xs">{r.sortOrder}</span> },
+    { key:'variableCount',label:'Variáveis', render: r => <span className="text-gray-400 text-xs">{r.variableCount}</span> },
+  ]
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <button onClick={openNew}
+          className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-xl transition-colors">
+          + Novo grupo
+        </button>
+      </div>
+      <AdminTable cols={cols} rows={items} onEdit={openEdit} onDelete={setDeleting}/>
+      {editing && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-[60]" onClick={() => setEditing(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-full max-w-sm p-6">
+            <h3 className="font-bold text-gray-900 mb-5 text-sm">
+              {editing.groupId ? 'Editar grupo' : 'Novo grupo'}
+            </h3>
+            <div className="flex flex-col gap-4">
+              <AdminField label="Template" required>
+                <AdminSelect value={editing.templateId}
+                  onChange={v=>setEditing(p=>({...p,templateId:parseInt(v)||null}))}>
+                  <option value="">— seleciona —</option>
+                  {templates.map(t=>(
+                    <option key={t.templateId} value={t.templateId}>{t.name}</option>
+                  ))}
+                </AdminSelect>
+              </AdminField>
+              <AdminField label="Código" required>
+                <AdminInput value={editing.code} onChange={v=>setEditing(p=>({...p,code:v}))} placeholder="ex: grp_rec" mono/>
+              </AdminField>
+              <AdminField label="Nome" required>
+                <AdminInput value={editing.name} onChange={v=>setEditing(p=>({...p,name:v}))} placeholder="ex: Receitas"
+                  onKeyDown={e=>e.key==='Enter'&&save()}/>
+              </AdminField>
+              <AdminField label="Ordem">
+                <AdminInput type="number" value={editing.sortOrder}
+                  onChange={v=>setEditing(p=>({...p,sortOrder:parseInt(v)||0}))}/>
+              </AdminField>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button onClick={()=>setEditing(null)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={save}
+                disabled={!editing.code.trim()||!editing.name.trim()||!editing.templateId||saving}
+                className="flex-1 px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white rounded-xl text-sm font-semibold">
+                {saving ? 'A guardar...' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {deleting && <AdminDeleteModal label={deleting.name} onConfirm={confirmDelete} onCancel={()=>setDeleting(null)}/>}
+    </div>
+  )
+}
+
+// ── Tab: Templates ───────────────────────────────────────────
+function TemplatesTab() {
+  const [items,   setItems]   = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState(null)
+  const [editing, setEditing] = useState(null)
+  const [deleting,setDeleting]= useState(null)
+  const [saving,  setSaving]  = useState(false)
+
+  useEffect(() => {
+    api.get('/admin/templates')
+      .then(setItems)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const openNew  = () => setEditing({ code:'', name:'', description:'' })
+  const openEdit = item => setEditing({ ...item })
+
+  const save = async () => {
+    if (!editing.code.trim() || !editing.name.trim()) return
+    setSaving(true)
+    try {
+      if (editing.templateId) {
+        const u = await api.put(`/admin/templates/${editing.templateId}`, editing)
+        setItems(p => p.map(x => x.templateId === u.templateId ? u : x))
+      } else {
+        const c = await api.post('/admin/templates', editing)
+        setItems(p => [...p, c])
+      }
+      setEditing(null)
+    } catch(e) { alert(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const confirmDelete = async () => {
+    try {
+      await api.delete(`/admin/templates/${deleting.templateId}`)
+      setItems(p => p.filter(x => x.templateId !== deleting.templateId))
+    } catch(e) { alert(e.message) }
+    finally { setDeleting(null) }
+  }
+
+  if (loading) return <p className="text-sm text-gray-400 text-center py-10">A carregar...</p>
+  if (error)   return <p className="text-sm text-red-500 text-center py-10">{error}</p>
+
+  const cols = [
+    { key:'code',        label:'Código',     mono:true },
+    { key:'name',        label:'Nome' },
+    { key:'description', label:'Descrição',  render: r => <span className="text-gray-400 text-xs truncate max-w-xs block">{r.description||'—'}</span> },
+    { key:'updatedAt',   label:'Actualizado',render: r => <span className="text-gray-400 text-xs">{new Date(r.updatedAt).toLocaleDateString('pt-PT')}</span> },
+  ]
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <button onClick={openNew}
+          className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-xl transition-colors">
+          + Novo template
+        </button>
+      </div>
+      <AdminTable cols={cols} rows={items} onEdit={openEdit} onDelete={setDeleting}/>
+      {editing && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-[60]" onClick={() => setEditing(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-full max-w-sm p-6">
+            <h3 className="font-bold text-gray-900 mb-5 text-sm">
+              {editing.templateId ? 'Editar template' : 'Novo template'}
+            </h3>
+            <div className="flex flex-col gap-4">
+              <AdminField label="Código" required>
+                <AdminInput value={editing.code} onChange={v=>setEditing(p=>({...p,code:v}))} placeholder="ex: tpl_base" mono/>
+              </AdminField>
+              <AdminField label="Nome" required>
+                <AdminInput value={editing.name} onChange={v=>setEditing(p=>({...p,name:v}))} placeholder="ex: Plano Base"/>
+              </AdminField>
+              <AdminField label="Descrição">
+                <textarea value={editing.description||''}
+                  onChange={e=>setEditing(p=>({...p,description:e.target.value}))}
+                  rows={3} placeholder="Descrição opcional..."
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm bg-white
+                             focus:outline-none focus:border-sky-400 transition-colors resize-none"/>
+              </AdminField>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button onClick={()=>setEditing(null)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={save} disabled={!editing.code.trim()||!editing.name.trim()||saving}
+                className="flex-1 px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white rounded-xl text-sm font-semibold">
+                {saving ? 'A guardar...' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {deleting && <AdminDeleteModal label={deleting.name} onConfirm={confirmDelete} onCancel={()=>setDeleting(null)}/>}
+    </div>
+  )
+}
+
+// ── Tab: Projectos ───────────────────────────────────────────
+function ProjectsTab() {
+  const [items,     setItems]     = useState([])
+  const [templates, setTemplates] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [error,     setError]     = useState(null)
+  const [editing,   setEditing]   = useState(null)
+  const [deleting,  setDeleting]  = useState(null)
+  const [saving,    setSaving]    = useState(false)
+
+  useEffect(() => {
+    Promise.all([api.get('/admin/projects'), api.get('/admin/templates')])
+      .then(([projs, tpls]) => { setItems(projs); setTemplates(tpls) })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const openNew  = () => setEditing({ code:'', name:'', templateId: templates[0]?.templateId ?? null })
+  const openEdit = item => setEditing({ ...item })
+
+  const save = async () => {
+    if (!editing.code.trim() || !editing.name.trim() || !editing.templateId) return
+    setSaving(true)
+    try {
+      if (editing.projectId) {
+        const u = await api.put(`/admin/projects/${editing.projectId}`, editing)
+        setItems(p => p.map(x => x.projectId === u.projectId ? u : x))
+      } else {
+        const c = await api.post('/admin/projects', editing)
+        setItems(p => [...p, c])
+      }
+      setEditing(null)
+    } catch(e) { alert(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const confirmDelete = async () => {
+    try {
+      await api.delete(`/admin/projects/${deleting.projectId}`)
+      setItems(p => p.filter(x => x.projectId !== deleting.projectId))
+    } catch(e) { alert(e.message) }
+    finally { setDeleting(null) }
+  }
+
+  if (loading) return <p className="text-sm text-gray-400 text-center py-10">A carregar...</p>
+  if (error)   return <p className="text-sm text-red-500 text-center py-10">{error}</p>
+
+  const cols = [
+    { key:'code',         label:'Código',   mono:true },
+    { key:'name',         label:'Nome' },
+    { key:'templateName', label:'Template' },
+    { key:'createdAt',    label:'Criado',   render: r => <span className="text-gray-400 text-xs">{new Date(r.createdAt).toLocaleDateString('pt-PT')}</span> },
+  ]
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <button onClick={openNew}
+          className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold rounded-xl transition-colors">
+          + Novo projecto
+        </button>
+      </div>
+      <AdminTable cols={cols} rows={items} onEdit={openEdit} onDelete={setDeleting}/>
+      {editing && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-[60]" onClick={() => setEditing(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
+                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-full max-w-sm p-6">
+            <h3 className="font-bold text-gray-900 mb-5 text-sm">
+              {editing.projectId ? 'Editar projecto' : 'Novo projecto'}
+            </h3>
+            <div className="flex flex-col gap-4">
+              <AdminField label="Código" required>
+                <AdminInput value={editing.code} onChange={v=>setEditing(p=>({...p,code:v}))} placeholder="ex: proj_acme" mono
+                  disabled={!!editing.projectId}/>
+              </AdminField>
+              <AdminField label="Nome" required>
+                <AdminInput value={editing.name} onChange={v=>setEditing(p=>({...p,name:v}))} placeholder="ex: Acme Corp"/>
+              </AdminField>
+              <AdminField label="Template" required>
+                <AdminSelect value={editing.templateId}
+                  onChange={v=>setEditing(p=>({...p,templateId:parseInt(v)||null}))}>
+                  <option value="">— seleciona —</option>
+                  {templates.map(t=>(
+                    <option key={t.templateId} value={t.templateId}>{t.name}</option>
+                  ))}
+                </AdminSelect>
+              </AdminField>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button onClick={()=>setEditing(null)}
+                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={save}
+                disabled={!editing.code.trim()||!editing.name.trim()||!editing.templateId||saving}
+                className="flex-1 px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-40 text-white rounded-xl text-sm font-semibold">
+                {saving ? 'A guardar...' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {deleting && <AdminDeleteModal label={deleting.name} onConfirm={confirmDelete} onCancel={()=>setDeleting(null)}/>}
+    </div>
+  )
+}
+
+// ── AdminPanel shell ─────────────────────────────────────────
+function AdminPanel({ onClose }) {
+  const [tab, setTab] = useState('types')
+
+  const tabs = [
+    { key:'types',  label:'Tipos de Versão' },
+    { key:'groups', label:'Grupos de Variáveis' },
+  ]
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/40 z-50" onClick={onClose}/>
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50
+                      bg-white rounded-2xl shadow-2xl border border-gray-100
+                      w-full max-w-3xl max-h-[85vh] flex flex-col">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+          <h2 className="font-bold text-gray-900">Configurações</h2>
+          <button onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">
+            ×
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-gray-100 shrink-0 px-6 overflow-x-auto">
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)}
+              className={`px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors
+                ${tab === t.key
+                  ? 'border-sky-500 text-sky-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-6">
+          {tab === 'types'  && <VersionTypesTab/>}
+          {tab === 'groups' && <VariableGroupsTab/>}
+        </div>
+      </div>
+    </>
+  )
+}
+
+
 export default function App(){
   const ctr = useRef(2)
 
@@ -1725,11 +2941,13 @@ export default function App(){
   })
 
   // Derived: template and its vars (what the engine uses)
-  const template = templates.find(t => t.id === project.templateId) ?? templates[0]
+  const [activeTemplateId, setActiveTemplateId] = useState(null)
+  const template = templates.find(t => t.id === (activeTemplateId ?? project?.templateId)) ?? templates[0]
   const vars     = template?.vars ?? []
 
   // ── Versions, periods, cells ──────────────────────────────
   const [versions, setVersions]     = useState([])
+  const [versionTypes, setVersionTypes] = useState([])  // [{versionTypeId, code, name, isLocked}]
   const [activeVerId, setActiveVerId] = useState(null)
   // ── Intervalo de períodos ────────────────────────────────
   const [rangeStart,  setRangeStart]  = useState(202601)
@@ -1743,9 +2961,10 @@ export default function App(){
   useEffect(() => {
     // Carrega só a lista de projectos — não auto-selecciona
     // O user escolhe o projecto no dropdown antes de ver os dados
-    loadProjectList()
-      .then(projects => {
+    Promise.all([loadProjectList(), api.get("/version-types")])
+      .then(([projects, types]) => {
         setAllProjects(projects)
+        setVersionTypes(types)
         setLoading(false)
       })
       .catch(err => {
@@ -1776,6 +2995,7 @@ export default function App(){
   // Muda de projecto — recarrega tudo
   const handleSelectProject = async projId => {
     if (projId === activeProjectId) return
+    setActiveTemplateId(null)
     setLoading(true)
     setActiveProjectId(projId)
     try {
@@ -1793,12 +3013,17 @@ export default function App(){
   const [modal,        setModal]        = useState(null)
   const [showTemplate, setShowTemplate] = useState(false)
   const [showProject,  setShowProject]  = useState(false)
+  const [editingProjectId, setEditingProjectId] = useState(null)  // null = list, id = edit specific project
   const [activeTest,   setActiveTest]   = useState(null)
   const [showDict,     setShowDict]     = useState(false)
 
   // ── Hamburger menu + dual panel ───────────────────────
   const [menuOpen,     setMenuOpen]     = useState(false)
-  const [cloning,      setCloning]      = useState(false)  // loading state do botão Nova versão
+  const [cloning,      setCloning]      = useState(false)
+  const [showAdmin,      setShowAdmin]      = useState(false)  // painel de administração
+  const [showNewVersion, setShowNewVersion] = useState(false) // modal de nova versão
+  const [newVerName,     setNewVerName]     = useState("")
+  const [newVerTypeId,   setNewVerTypeId]   = useState(null)
 
   // ── Delta log — detalhe das variáveis afectadas por interacção ──
   const [deltaLog,     setDeltaLog]     = useState([])
@@ -1814,6 +3039,7 @@ export default function App(){
   const [filterScope1, setFilterScope1] = useState('')   // '' | 'template' | 'language' | 'lob'
   // Filtro de variáveis afectadas — activado automaticamente após cada cálculo
   const [filterAffected1, setFilterAffected1] = useState(false)
+  const [filterGroup1,    setFilterGroup1]    = useState('')   // '' | groupId as string
   const [filterType1,  setFilterType1]  = useState('')   // '' | 'input' | 'calculated'
   const [filterLang1,  setFilterLang1]  = useState('')
   const [filterLob1,   setFilterLob1]   = useState('')
@@ -1841,6 +3067,21 @@ export default function App(){
     setCompareMode(p=>!p)
   }
 
+  // ── Lock helpers ──────────────────────────────────────────
+  const today = new Date()
+  const currentPeriod = today.getFullYear() * 100 + (today.getMonth() + 1)
+
+  // Versão bloqueada por tipo
+  const activeVersion   = versions.find(v => v.id === activeVerId)
+  const isVersionLocked = activeVersion?.isLocked ?? false
+
+  // Célula bloqueada: versão locked OU período passado
+  const isCellLocked = (period) => {
+    if (isVersionLocked) return "locked"
+    if (period < currentPeriod) return "past"
+    return false
+  }
+
   // ── Dirty helpers ─────────────────────────────────────────
   const dirtyVarIds = useMemo(()=>{const ids=new Set();for(const k of dirtyKeys){const p=k.split("·");if(p[3])ids.add(p[3])};return ids},[dirtyKeys])
   const isDirtyCell = (vid,lid,bid,period,verId=activeVerId) => dirtyKeys.has(mk(project.id,verId,period,vid,lid,bid))
@@ -1854,24 +3095,58 @@ export default function App(){
   const handleLaunchFromDict = id => {const t=TESTS.find(x=>x.id===id);if(t){setActiveTest(t);setDirtyKeys(new Set())};setShowDict(false)}
 
   // ── Template handlers ─────────────────────────────────────
-  const handleSaveTemplate = (newTpl) => {
+  const handleSaveTemplate = async (newTpl) => {
     // newTpl = { id, name, description } — vars are managed separately via VarModal
+    const rawId = parseInt(newTpl.id.replace('tpl_',''))
+    try {
+      await api.put(`/admin/templates/${rawId}`, { code: newTpl.id, name: newTpl.name, description: newTpl.description })
+    } catch(e) { console.error('Save template:', e) }
     setTemplates(prev => prev.map(t => t.id===newTpl.id ? {...t, name:newTpl.name, description:newTpl.description} : t))
     setShowTemplate(false)
   }
 
-  const handleNewTemplate = () => {
-    const id = `tpl_${String(tplCtr.current++).padStart(3,"0")}`
-    setTemplates(prev => [...prev, { id, name: `Novo Template ${tplCtr.current-1}`, description: "", vars: [] }])
+  const handleNewTemplate = async () => {
+    try {
+      const created = await api.post('/admin/templates', { code: `tpl_new_${Date.now()}`, name: "Novo Template", description: "" })
+      const newId = `tpl_${created.templateId}`
+      setTemplates(prev => [...prev, { id: newId, name: created.name, description: created.description ?? "", vars: [] }])
+    } catch(e) {
+      // Fallback to in-memory if API fails
+      const id = `tpl_${String(tplCtr.current++).padStart(3,"0")}`
+      setTemplates(prev => [...prev, { id, name: `Novo Template`, description: "", vars: [] }])
+    }
   }
 
   // Variables live inside the active template
-  const handleSaveVar = v => {
+  const handleDeleteTemplate = async (tplId) => {
+    const rawId = parseInt(tplId.replace('tpl_',''))
+    try { await api.delete(`/admin/templates/${rawId}`) } catch(e) { console.error('Delete template:', e) }
+    setTemplates(prev => prev.filter(t => t.id !== tplId))
+    setShowTemplate(false)
+  }
+
+  const handleSwitchTemplate = (tplId) => {
+    // Switch active template — reload vars from it
+    const tpl = templates.find(t => t.id === tplId)
+    if (tpl) {
+      setTemplates(prev => prev.map(t => ({...t})))  // force re-render with new active
+      // Navigate to the selected template by making it "active"
+      // The TemplateModal re-renders with the new template prop
+      const idx = templates.findIndex(t => t.id === tplId)
+      if (idx >= 0) setTemplates(prev => {
+        const reordered = [...prev]
+        // Move selected to front so template = templates[0]... actually just close and reopen
+        return prev
+      })
+    }
+  }
+
+  const handleSaveVar = async v => {
     const currentVars = vars
     const exists = currentVars.find(x => x.id === v.id)
     const newVars = exists ? currentVars.map(x=>x.id===v.id?v:x) : [...currentVars, v]
     setTemplates(prev => prev.map(t => t.id===template.id ? {...t, vars:newVars} : t))
-    setCells(c => {let r=c;for(const ver of versions)r=recalcAll(newVars,periods,project,r,ver.id);return r})
+    if (project) setCells(c => {let r=c;for(const ver of versions)r=recalcAll(newVars,periods,project,r,ver.id);return r})
     setModal(null)
   }
 
@@ -1883,6 +3158,18 @@ export default function App(){
   }
 
   // ── Project handlers ──────────────────────────────────────
+  const handleCreateProject = async () => {
+    // Opens ProjectModal with a blank project
+    setEditingProjectId('new')
+  }
+
+  const handleDeleteProject = async (projectId) => {
+    try {
+      await api.delete(`/admin/projects/${projectId}`)
+      setAllProjects(prev => prev.filter(p => p.projectId !== projectId))
+    } catch(e) { alert('Erro ao eliminar projecto: ' + e.message) }
+  }
+
   const handleSaveProject = newProject => {
     const newTemplate = templates.find(t=>t.id===newProject.templateId) ?? template
     const newVars     = newTemplate.vars
@@ -1907,13 +3194,21 @@ export default function App(){
       for (const ver of versions) newCells = recalcAll(newVars, periods, newProject, newCells, ver.id)
     }
 
+    // Persist to API (name + templateId only — languages managed separately)
+    const rawId = parseInt(newProject.id.replace('c_',''))
+    if (rawId) {
+      const rawTplId = parseInt(newProject.templateId.replace('tpl_',''))
+      api.put(`/admin/projects/${rawId}`, {
+        templateId: rawTplId, code: newProject.code ?? '', name: newProject.name
+      }).catch(e => console.error('Save project:', e))
+    }
     setProject(newProject)
+    setAllProjects(prev => prev.map(p => p.projectId === rawId ? {...p, name: newProject.name} : p))
     setCells(newCells)
     setShowProject(false)
   }
 
   // ── Version handlers ──────────────────────────────────────
-  const activeVersion  = versions.find(v=>v.id===activeVerId)
   const activeColorIdx = versions.findIndex(v=>v.id===activeVerId)
   const handleSelectVersion = async verId => {
     setActiveVerId(verId)
@@ -1950,26 +3245,33 @@ export default function App(){
     return () => window.removeEventListener('keydown', onKey)
   }, [undoStack])
 
+  const openNewVersionModal = () => {
+    if (!activeVerId) { alert("Nenhuma versão activa seleccionada."); return }
+    const idx = versions.length + 1
+    setNewVerName(`Versão ${idx}`)
+    setNewVerTypeId(versionTypes[0]?.versionTypeId ?? null)
+    setShowNewVersion(true)
+  }
+
   const handleAddVersion = async () => {
     if (cloning) return
-    if (!activeVerId) { alert("Nenhuma versão activa seleccionada."); return }
-    const idx      = versions.length + 1
-    const suggested = `Versão ${idx}`
-    const name = window.prompt("Nome da nova versão:", suggested)
-    if (name === null) return               // utilizador cancelou
-    const trimmed = name.trim() || suggested
+    const trimmed = (newVerName || "").trim()
+    if (!trimmed || !newVerTypeId) return
+    setShowNewVersion(false)
     setCloning(true)
+    const idx = versions.length + 1
     const ts = Date.now().toString(36).slice(-4)
     try {
       const newVer = await api.post("/versions/clone", {
         fromVersionId: activeVerId,
         code: `v${idx}_${ts}`,
-        name: trimmed
+        name: trimmed,
+        versionTypeId: newVerTypeId
       })
       const cellsResp = await api.get(`/versions/${newVer.versionId}/cells`)
 
       const newCells = apiCellsToProto(cellsResp.cells, project, vars, newVer.versionId)
-      setVersions(prev => [...prev, { id: newVer.versionId, name: newVer.name, colorIdx: idx % VER_PALETTE.length }])
+      setVersions(prev => [...prev, { id: newVer.versionId, name: newVer.name, colorIdx: idx % VER_PALETTE.length, typeName: newVer.versionTypeName, isLocked: newVer.isLocked }])
       setCells(prev => ({ ...prev, ...newCells }))
       setActiveVerId(newVer.versionId)
       setDirtyKeys(new Set())
@@ -2215,9 +3517,11 @@ export default function App(){
   // ── Filter helper ─────────────────────────────────────
   const isInput  = v => !v.formula && !v.alternatives?.length
 
-  const applyFilters = (allRows, fScope, fType, fLang, fLob, fVar, affectedIds) => allRows.filter(({v, lid, bid}) => {
+  const applyFilters = (allRows, fScope, fType, fLang, fLob, fVar, affectedIds, fGroup) => allRows.filter(({v, lid, bid}) => {
     // Filtro de afectadas — tem precedência sobre todos os outros
     if (affectedIds && !affectedIds.has(v.id)) return false
+    // Filtro de grupo
+    if (fGroup && String(v.groupId) !== fGroup) return false
     // Filtro por âmbito (scope)
     if (fScope && v.scope !== fScope) return false
     // Filtro por tipo (input vs calculada)
@@ -2274,6 +3578,16 @@ export default function App(){
   const activeCol  = verColor(activeColorIdx)
   const deltaLabel = orderedCV.length===2?`Δ ${orderedCV[1].name} − ${orderedCV[0].name}`:orderedCV.length>2?`Δ ${orderedCV[orderedCV.length-1].name} − ${orderedCV[0].name}`:"Δ"
 
+  // Grupos disponíveis — derivados das variáveis carregadas (hook antes dos early returns)
+  const availableGroups = useMemo(() => {
+    const seen = new Map()
+    vars.forEach(v => {
+      if (v.groupId && !seen.has(v.groupId))
+        seen.set(v.groupId, v.groupName ?? `Grupo ${v.groupId}`)
+    })
+    return Array.from(seen.entries()).map(([id, name]) => ({ id: String(id), name }))
+  }, [vars])
+
   // ── Loading / error screen ───────────────────────────────
   if (loading) return (
     <div className="flex items-center justify-center h-screen bg-gray-50">
@@ -2297,8 +3611,8 @@ export default function App(){
   const affectedVarIds1 = filterAffected1 && deltaLog.length
     ? new Set(deltaLog.map(e => e.varCode))
     : null
-  const rows1 = applyFilters(rows, filterScope1, filterType1, filterLang1, filterLob1, filterVar1, affectedVarIds1)
-  const rows2 = applyFilters(rows, filterScope2, filterType2, filterLang2, filterLob2, filterVar2, null)
+  const rows1 = applyFilters(rows, filterScope1, filterType1, filterLang1, filterLob1, filterVar1, affectedVarIds1, filterGroup1)
+  const rows2 = applyFilters(rows, filterScope2, filterType2, filterLang2, filterLob2, filterVar2, null, null)
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
@@ -2306,8 +3620,9 @@ export default function App(){
       {/* ── Hamburger Sidebar ── */}
       <HamburgerMenu open={menuOpen} onClose={()=>setMenuOpen(false)}
         onTemplate={()=>setShowTemplate(true)}
-        onProject={()=>setShowProject(true)}
-        onDict={()=>setShowDict(true)}/>
+        onProject={()=>{ setShowProject(true); setEditingProjectId(null) }}
+        onDict={()=>setShowDict(true)}
+        onAdmin={()=>setShowAdmin(true)}/>
 
       {/* ── Header ── */}
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3 shrink-0 shadow-sm flex-wrap">
@@ -2363,6 +3678,16 @@ export default function App(){
             <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
           </div>
         </div>
+
+        {/* ── Admin button ── */}
+        <button onClick={()=>setShowAdmin(true)} title="Configurações"
+          className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 0 1 1.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.559.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.894.149c-.424.07-.764.383-.929.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 0 1-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.398.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 0 1-.12-1.45l.527-.737c.25-.35.272-.806.108-1.204-.165-.397-.506-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 0 1 .12-1.45l.773-.773a1.125 1.125 0 0 1 1.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894Z"/>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
+          </svg>
+        </button>
 
         {/* ── Âmbito legend ── */}
         <div className="flex items-center gap-2 border-r border-gray-200 pr-4 shrink-0">
@@ -2422,7 +3747,7 @@ export default function App(){
                   onRename={name=>handleRenameVersion(ver.id,name)}
                   onDelete={()=>handleDeleteVersion(ver.id)} canDelete={versions.length>1}/>
               ))}
-              <button onClick={handleAddVersion} disabled={cloning}
+              <button onClick={openNewVersionModal} disabled={cloning}
                 className="flex items-center gap-1.5 px-3 py-2.5 text-gray-400 hover:text-gray-600 text-xs font-medium transition-colors whitespace-nowrap border-b-2 border-transparent hover:border-gray-200 ml-1 disabled:opacity-50 disabled:cursor-not-allowed">
                 {cloning ? <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin inline-block"/> : null}
                 {cloning ? "A criar..." : "+ Nova versão"}
@@ -2459,18 +3784,19 @@ export default function App(){
                 filterType={filterType1}   setFilterType={setFilterType1}
                 filterLang={filterLang1}   setFilterLang={setFilterLang1}
                 filterLob={filterLob1}     setFilterLob={setFilterLob1}
-                filterVar={filterVar1}     setFilterVar={setFilterVar1}/>
+                filterVar={filterVar1}     setFilterVar={setFilterVar1}
+                filterGroup={filterGroup1} setFilterGroup={setFilterGroup1}
+                availableGroups={availableGroups}/>
               {/* Pill de variáveis afectadas */}
               {deltaLog.length > 0 && (
                 <div className="flex items-center gap-1.5 shrink-0">
                   {!filterAffected1 ? (
                     <button onClick={()=>setFilterAffected1(true)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold
-                                 bg-orange-50 border border-orange-200 text-orange-600
-                                 hover:bg-orange-100 transition-colors">
-                      <span className="w-2 h-2 rounded-full bg-orange-400"/>
+                                 bg-orange-500 hover:bg-orange-600 text-white transition-colors">
+                      <span className="w-2 h-2 rounded-full bg-white/80"/>
                       {new Set(deltaLog.map(e=>e.varCode)).size} afectadas
-                      <span className="text-orange-400 font-normal">Ver só estas</span>
+                      <span className="ml-0.5 px-1.5 py-0.5 bg-white/20 rounded-md">Ver só estas</span>
                     </button>
                   ) : (
                     <div className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold
@@ -2514,6 +3840,9 @@ export default function App(){
                     const{v,lid,bid,ctx}=row
                     const prev=rows1[idx-1];const isFirst=!prev||prev.v.id!==v.id
                     const next=rows1[idx+1];const isLast=!next||next.v.id!==v.id
+                    // Group header — only when group changes and variable has a group
+                    const prevGroupId=prev?.v?.groupId
+                    const showGroupHeader=isFirst&&v.groupId&&v.groupId!==prevGroupId
                     const sc=SC[v.scope];const inp=isInput(v)
                     const varDirty=isVarDirty(v.id);const varTarget=isTarget(v.id)
                     const seqNum=updateOrder[v.id];const rowBg=varTarget?"bg-green-50/60":inp?"bg-cyan-50/40":sc.bg
@@ -2521,8 +3850,18 @@ export default function App(){
                                    :isFirst?"border-t-2 border-t-gray-300 border-b border-b-gray-100"
                                    :isLast?"border-b-2 border-b-gray-300 border-t-0"
                                    :"border-b border-b-gray-100"
-                    return(
-                      <tr key={`${v.id}-${lid}-${bid}`} className={`transition-colors ${rowBg} ${borderCls}`}>
+                    const groupHeaderRow = showGroupHeader ? (
+                      <tr key={`grp-${v.groupId}`} className="bg-gray-50 border-t-2 border-gray-200">
+                        <td colSpan={999} className="px-4 py-1.5">
+                          <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">
+                            {v.groupName}
+                          </span>
+                        </td>
+                      </tr>
+                    ) : null
+                    return(<>
+                      {groupHeaderRow}
+                      <tr key={`row-${v.id}-${lid}-${bid}`} className={`transition-colors ${rowBg} ${borderCls}`}>
                         <td className="px-4 py-2 align-top">
                           {isFirst&&(<div className="relative pr-5">
                             <OrderBadge n={seqNum}/>
@@ -2548,7 +3887,7 @@ export default function App(){
                           const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period)
                           const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
                           const dirty=isDirtyCell(v.id,lid,bid,period);const toEdit=varTarget&&inp
-                          return(<td key={period} className="border-l border-gray-100 p-0">{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
+                          return(<td key={period} className="border-l border-gray-100 p-0">{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv)} locked={isCellLocked(period)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty} status={cs?.status}/>}</td>)
                         })}
                         {canCompare&&periods.flatMap(period=>{
                           const vCells=orderedCV.map((ver,vi)=>{
@@ -2556,7 +3895,7 @@ export default function App(){
                             const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period,ver.id)
                             const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
                             const dirty=isDirtyCell(v.id,lid,bid,period,ver.id);const toEdit=varTarget&&inp
-                            return(<td key={`${period}-${ver.id}`} className={`${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"} p-0`}>{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv,ver.id)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty}/>}</td>)
+                            return(<td key={`${period}-${ver.id}`} className={`${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"} p-0`}>{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv,ver.id)} locked={isCellLocked(period)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty} status={cs?.status}/>}</td>)
                           })
                           if(!showDelta)return vCells
                           const vA=cells[mk(project.id,orderedCV[0].id,period,v.id,lid,bid)]?.value
@@ -2564,6 +3903,7 @@ export default function App(){
                           return[...vCells,<td key={`${period}-delta`} className="border-l border-indigo-100 bg-indigo-50/30 p-0"><DeltaCell valueA={vA} valueB={vB}/></td>]
                         })}
                       </tr>
+                    </>
                     )
                   })}
                 </tbody>
@@ -2717,6 +4057,21 @@ export default function App(){
         </footer>
       )}
 
+      {/* ── Admin panel ── */}
+      {showAdmin && (
+        <AdminPanel onClose={()=>setShowAdmin(false)}/>
+      )}
+
+      {/* ── Nova versão modal ── */}
+      {showNewVersion && (
+        <NewVersionModal
+          versionTypes={versionTypes}
+          name={newVerName} setName={setNewVerName}
+          typeId={newVerTypeId} setTypeId={setNewVerTypeId}
+          onConfirm={handleAddVersion}
+          onCancel={()=>setShowNewVersion(false)}/>
+      )}
+
       {/* ── Delta log modal ── */}
       {showDeltaLog && deltaLog.length > 0 && (
         <DeltaLogModal entries={deltaLog} onClose={()=>setShowDeltaLog(false)}/>
@@ -2724,16 +4079,53 @@ export default function App(){
 
       {/* ── Modals ── */}
       {showTemplate&&(
-        <TemplateModal template={template} vars={vars}
-          onSave={handleSaveTemplate} onClose={()=>setShowTemplate(false)}
-          onNewTemplate={handleNewTemplate}
+        <TemplateModal
+          initialTemplateId={project ? parseInt(project.templateId.replace('tpl_','')) : null}
+          onClose={()=>setShowTemplate(false)}
           onEditVar={v=>{setShowTemplate(false);setModal(v)}}
-          onAddVar={()=>{setShowTemplate(false);setModal("new")}}/>
+          onAddVar={tplId=>{setShowTemplate(false);setModal("new")}}/>
       )}
-      {showProject&&(
-        <ProjectModal project={project} templates={templates}
-          onSave={handleSaveProject} onClose={()=>setShowProject(false)}/>
+      {showProject && !editingProjectId && (
+        <ProjectListPanel
+          allProjects={allProjects}
+          templates={templates}
+          onEdit={id=>setEditingProjectId(id)}
+          onCreate={handleCreateProject}
+          onDelete={handleDeleteProject}
+          onClose={()=>setShowProject(false)}/>
       )}
+      {showProject && editingProjectId && (() => {
+        const isNew = editingProjectId === 'new'
+        const editAp = allProjects.find(p=>p.projectId===editingProjectId)
+        const editProj = isNew
+          ? { id: '', name: '', templateId: '', languages: [] }
+          : editingProjectId === activeProjectId && project
+            ? project
+            : editAp
+              ? { id: `c_${editAp.projectId}`, name: editAp.name, templateId: `tpl_${editAp.templateId}`, languages: [] }
+              : null
+        if (!editProj && !isNew) { setEditingProjectId(null); return null }
+        return (
+          <ProjectModal project={editProj} templates={templates} isNew={isNew} activeProjectId={activeProjectId}
+            onSave={async p => {
+              if (isNew) {
+                const rawTplId = parseInt(p.templateId.replace('tpl_',''))
+                try {
+                  const created = await api.post('/admin/projects', {
+                    templateId: rawTplId, code: `proj_${Date.now()}`, name: p.name
+                  })
+                  setAllProjects(prev => [...prev, created])
+                } catch(e) { alert('Erro ao criar projecto: ' + e.message) }
+                setEditingProjectId(null)
+                setShowProject(false)
+              } else {
+                handleSaveProject(p)
+                setEditingProjectId(null)
+              }
+            }}
+            onClose={()=>setEditingProjectId(null)}/>
+        )
+      })()}
       {showDict&&<DictModal onClose={()=>setShowDict(false)} onLaunch={handleLaunchFromDict}/>}
       {modal&&<VarModal variable={modal==="new"?null:modal} variables={vars} client={project}
         onSave={handleSaveVar} onClose={()=>setModal(null)}

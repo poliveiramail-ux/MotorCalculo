@@ -40,6 +40,15 @@ public sealed class VersionController(VersionService versionService) : Controlle
         return CreatedAtAction(nameof(GetById), new { id = version.VersionId }, version);
     }
 
+    /// <summary>GET /api/version-types — lista de tipos de versão</summary>
+    [HttpGet("/api/version-types")]
+    [ProducesResponseType(typeof(IReadOnlyList<VersionTypeDto>), 200)]
+    public async Task<IActionResult> GetVersionTypes(CancellationToken ct)
+    {
+        var types = await versionService.GetVersionTypesAsync(ct);
+        return Ok(types);
+    }
+
     /// <summary>POST /api/versions/clone — clonar versão existente</summary>
     [HttpPost("clone")]
     [ProducesResponseType(typeof(VersionResponse), 201)]

@@ -7,7 +7,7 @@ using MotorCalculo.Infrastructure.Repositories.Interfaces;
 
 namespace MotorCalculo.Infrastructure.Extensions;
 
-public static class ServiceCollectionExtensions
+public static class InfrastructureExtensions
 {
     /// <summary>
     /// Regista todos os serviços da camada Infrastructure no DI container.
@@ -39,7 +39,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITemplateRepository, TemplateRepository>();
         services.AddScoped<IProjectRepository,  ProjectRepository>();
         services.AddScoped<IVersionRepository,  VersionRepository>();
-        services.AddScoped<ICellRepository,     CellRepository>();
+        services.AddScoped<ICellRepository,          CellRepository>();
+        services.AddScoped<IVariableGroupRepository, VariableGroupRepository>();
 
         return services;
     }

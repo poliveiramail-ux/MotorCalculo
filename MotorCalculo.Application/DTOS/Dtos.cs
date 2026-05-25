@@ -59,10 +59,20 @@ public sealed record CreateVersionRequest(
     string Name
 );
 
+/// <summary>Tipo de versão disponível para selecção ao criar/clonar.</summary>
+public sealed record VersionTypeDto(
+    int    VersionTypeId,
+    string Code,
+    string Name,
+    bool   IsLocked,
+    int    SortOrder
+);
+
 public sealed record CloneVersionRequest(
     int    FromVersionId,
     string Code,
-    string Name
+    string Name,
+    int?   VersionTypeId
 );
 
 public sealed record VersionResponse(
@@ -72,7 +82,10 @@ public sealed record VersionResponse(
     string   Name,
     int?     ClonedFromId,
     byte     ColorIndex,
-    DateTime CreatedAt
+    DateTime CreatedAt,
+    int?     VersionTypeId,
+    string?  VersionTypeName,
+    bool     IsLocked
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -94,6 +107,7 @@ public sealed record VariableResponse(
     string? ExternalField,
     int     SortOrder,
     int?    GroupId,
+    string? GroupName,
     IReadOnlyList<FormulaResponse> Formulas
 );
 
@@ -129,6 +143,72 @@ public sealed record LanguageResponse(
 
 public sealed record LobResponse(
     int    LobId,
+    string Code,
+    string Name
+);
+
+// ─────────────────────────────────────────────────────────────
+//  Admin — Tipos de Versão
+// ─────────────────────────────────────────────────────────────
+public sealed record UpsertVersionTypeRequest(
+    string Code,
+    string Name,
+    bool   IsLocked,
+    int    SortOrder
+);
+
+// ─────────────────────────────────────────────────────────────
+//  Admin — Grupos de Variáveis
+// ─────────────────────────────────────────────────────────────
+public sealed record VariableGroupDto(
+    int    GroupId,
+    int    TemplateId,
+    string TemplateName,
+    string Code,
+    string Name,
+    int    SortOrder,
+    int    VariableCount
+);
+
+public sealed record UpsertVariableGroupRequest(
+    int    TemplateId,
+    string Code,
+    string Name,
+    int    SortOrder
+);
+
+// ─────────────────────────────────────────────────────────────
+//  Admin — Templates
+// ─────────────────────────────────────────────────────────────
+public sealed record AdminTemplateDto(
+    int       TemplateId,
+    string    Code,
+    string    Name,
+    string?   Description,
+    DateTime  CreatedAt,
+    DateTime  UpdatedAt
+);
+
+public sealed record UpsertTemplateRequest(
+    string  Code,
+    string  Name,
+    string? Description
+);
+
+// ─────────────────────────────────────────────────────────────
+//  Admin — Projectos
+// ─────────────────────────────────────────────────────────────
+public sealed record AdminProjectDto(
+    int      ProjectId,
+    int      TemplateId,
+    string   TemplateName,
+    string   Code,
+    string   Name,
+    DateTime CreatedAt
+);
+
+public sealed record UpsertProjectRequest(
+    int    TemplateId,
     string Code,
     string Name
 );
