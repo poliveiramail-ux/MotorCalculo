@@ -349,24 +349,6 @@ const topoSort = vs => {
 }
 
 // ── Update order ─────────────────────────────────────────────
-const computeUpdateOrder = (vars, targetVarIds) => {
-  const targetSet = new Set(targetVarIds)
-  const calcDeps = {}
-  for (const v of vars) {
-    if (!v.formula && !v.alternatives?.length) continue
-    calcDeps[v.id] = new Set()
-    ;[v.formula, ...(v.alternatives || []).map(a => a.formula)].filter(Boolean).forEach(f => {
-      const r = tryParse(f); if (!r.ok) return
-      getDeps(r.ast).forEach(d => calcDeps[v.id].add(d.id))
-    })
-  }
-  const affected = new Set(targetVarIds)
-  let changed = true
-  while (changed) { changed = false; for (const [vid, deps] of Object.entries(calcDeps)) { if (!affected.has(vid) && [...deps].some(id => affected.has(id))) { affected.add(vid); changed = true } } }
-  const seq = [...topoSort(vars.filter(v => v.scope === "lob")), ...topoSort(vars.filter(v => v.scope === "language")), ...topoSort(vars.filter(v => v.scope === "project"))].filter(v => affected.has(v.id) && !targetSet.has(v.id))
-  const order = {}; seq.forEach((v, i) => { order[v.id] = i + 1 }); return order
-}
-
 // ── Evaluator ────────────────────────────────────────────────
 // ctx includes { cid, ver, period, lid, bid }
 // Regras:
@@ -573,99 +555,6 @@ const deleteVersionCells = (cs, verId) => {
    DATA
    ═══════════════════════════════════════════════════════════════ */
 
-// CLIENT is the initial hardcoded value; the mutable version lives in App state (client).
-// Each language and LOB has both code (used in formula qualifiers [PT][ret]) and name (display).
-const CLIENT = {
-  id: "c_001", name: "Acme Corp",
-  languages: [
-    { id: "l_pt", code: "PT", name: "Português", lobs: [
-      { id: "b_ret",  code: "ret",  name: "Retalho"  },
-      { id: "b_emp",  code: "emp",  name: "Empresas" },
-    ]},
-    { id: "l_en", code: "EN", name: "English", lobs: [
-      { id: "b_reta", code: "reta", name: "Retail" },
-    ]},
-  ]
-}
-
-const DEF_VARS = [
-  { id: "v_rec", name: "Receita (€)",      scope: "lob",      formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_cus", name: "Custo (€)",        scope: "lob",      formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_vol", name: "Volume (un.)",     scope: "lob",      formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_prz", name: "Prazo médio (d.)",scope: "lob",      formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_mar", name: "Margem (€)",       scope: "lob",      formula: "v_rec - v_cus",                               alternatives: [], defaultFormula: null },
-  { id: "v_pct", name: "Margem %",         scope: "lob",      formula: "(v_rec - v_cus) / v_rec * 100",              alternatives: [], defaultFormula: null },
-  { id: "v_rpu", name: "Rec./unidade",     scope: "lob",      formula: "v_rec / v_vol",                               alternatives: [], defaultFormula: null },
-  { id: "v_cvu", name: "Custo/unidade",    scope: "lob",      formula: "v_cus / v_vol",                               alternatives: [], defaultFormula: null },
-  { id: "v_mpu", name: "Margem/unidade",   scope: "lob",      formula: "v_rpu - v_cvu",                               alternatives: [], defaultFormula: null },
-  { id: "v_rot", name: "Rotação (€·d)",    scope: "lob",      formula: "v_rec * v_prz / 30",                         alternatives: [], defaultFormula: null },
-  { id: "v_sal", name: "Saldo Acum.",      scope: "lob",      formula: "PREV(v_sal) + v_mar",                        alternatives: [], defaultFormula: null },
-  { id: "v_acm", name: "Rec. Acumulada",   scope: "lob",      formula: "PREV(v_acm) + v_rec - v_cus",               alternatives: [], defaultFormula: null },
-  { id: "v_bgt", name: "Budget (€)",       scope: "language", formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_trc", name: "Total Receita",    scope: "language", formula: "SUM_LOBS(v_rec)",                             alternatives: [], defaultFormula: null },
-  { id: "v_tot", name: "Total Margem",     scope: "language", formula: "SUM_LOBS(v_mar)",                             alternatives: [], defaultFormula: null },
-  { id: "v_eff", name: "Eficiência %",     scope: "language", formula: "SUM_LOBS(v_mar) / SUM_LOBS(v_rec) * 100",   alternatives: [], defaultFormula: null },
-  { id: "v_dev", name: "Desvio Budget",    scope: "language", formula: "SUM_LOBS(v_mar) - v_bgt",                   alternatives: [], defaultFormula: null },
-  { id: "v_tgt", name: "Target (€)",       scope: "project", formula: null,                                          alternatives: [], defaultFormula: null },
-  { id: "v_tgr", name: "Receita Global",   scope: "project", formula: "SUM_LANGS(v_trc)",                            alternatives: [], defaultFormula: null },
-  { id: "v_gbl", name: "Margem Global",    scope: "project", formula: "SUM_LANGS(v_tot)",                            alternatives: [], defaultFormula: null },
-  { id: "v_gmg", name: "Margem Global %",  scope: "project", formula: "SUM_LANGS(v_tot) / SUM_LANGS(v_trc) * 100", alternatives: [], defaultFormula: null },
-  { id: "v_gap", name: "Gap vs. Target",   scope: "project", formula: "SUM_LANGS(v_tot) - v_tgt",                   alternatives: [], defaultFormula: null },
-  // ── Variáveis com referências absolutas [lang][lob] — demonstração da sintaxe ──
-  // v_idx: índice de receita de cada LOB face ao PT/Retalho (base=100)
-  //   v_rec         → receita do contexto corrente (relativa)
-  //   v_rec[PT][ret]→ receita de PT/Retalho sempre (absoluta)
-  { id: "v_idx", name: "Índice vs PT/Ret",  scope: "lob",      formula: "v_rec / v_rec[PT][ret] * 100",   alternatives: [], defaultFormula: null },
-  // v_dif: desvio de margem de cada língua face a PT (absoluto)
-  //   v_tot         → margem total da língua corrente (relativa)
-  //   v_tot[PT]     → margem total de PT sempre (absoluta)
-  { id: "v_dif", name: "Desvio vs PT",      scope: "language", formula: "v_tot - v_tot[PT]",              alternatives: [], defaultFormula: null },
-  // v_cmp: rácio de margem total PT/EN × 100
-  //   v_tot[PT] e v_tot[EN] são ambas referências absolutas
-  { id: "v_cmp", name: "Rácio PT/EN %",     scope: "project", formula: "v_tot[PT] / v_tot[EN] * 100",   alternatives: [], defaultFormula: null },
-  // ── Variável com fórmulas alternativas — exemplo do mecanismo @ ───────────
-  // Resultado Ajustado usa fórmulas diferentes consoante o último input editado:
-  //   @ v_prz  →  margem penalizada pelo prazo médio   (v_mar - v_mar * v_prz / 100)
-  //   @ v_vol  →  margem por unidade × volume           (v_mar / v_vol * v_vol = v_mpu * v_vol... simplif: v_mar * v_vol / 50)
-  //   default  →  apenas a margem directa               (v_mar)
-  // Triggers: v_prz e v_vol são inputs existentes — editar qualquer um deles activa a fórmula correspondente.
-  { id: "v_res", name: "Result. Ajustado", scope: "lob",
-    formula: null,
-    alternatives: [
-      { trigger: "v_prz", formula: "v_mar - v_mar * v_prz / 100" },
-      { trigger: "v_vol", formula: "v_mar * v_vol / 50" },
-    ],
-    defaultFormula: "v_mar" },
-]
-
-const DEF_PERIODS = [202601, 202602, 202603]
-
-const buildCells = (verId) => {
-  const c = {}, cid = "c_001"
-  ;[
-    ["v_rec","l_pt","b_ret",  [1000,1200, 900]],
-    ["v_rec","l_pt","b_emp",  [2000,2100,2200]],
-    ["v_rec","l_en","b_reta", [ 500, 600, 550]],
-    ["v_cus","l_pt","b_ret",  [ 600, 700, 500]],
-    ["v_cus","l_pt","b_emp",  [1200,1300,1250]],
-    ["v_cus","l_en","b_reta", [ 300, 350, 320]],
-    ["v_vol","l_pt","b_ret",  [  50,  60,  45]],
-    ["v_vol","l_pt","b_emp",  [ 100, 105, 110]],
-    ["v_vol","l_en","b_reta", [  25,  30,  27]],
-    ["v_prz","l_pt","b_ret",  [  30,  30,  30]],
-    ["v_prz","l_pt","b_emp",  [  45,  45,  60]],
-    ["v_prz","l_en","b_reta", [  15,  15,  15]],
-  ].forEach(([vid, lid, bid, vals]) => DEF_PERIODS.forEach((p, i) => { c[mk(cid, verId, p, vid, lid, bid)] = { value: vals[i] } }))
-  ;[["v_bgt","l_pt",[400,420,450]], ["v_bgt","l_en",[150,160,175]]].forEach(([vid, lid, vals]) =>
-    DEF_PERIODS.forEach((p, i) => { c[mk(cid, verId, p, vid, lid)] = { value: vals[i] } }))
-  DEF_PERIODS.forEach((p, i) => { c[mk(cid, verId, p, "v_tgt")] = { value: [700,750,800][i] } })
-  return c
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   VERSIONS
-   ═══════════════════════════════════════════════════════════════ */
-
 const VER_PALETTE = [
   { dot: "bg-indigo-400",  tab: "text-indigo-700",  active: "border-indigo-400 text-indigo-700",  bg: "bg-indigo-50/60"  },
   { dot: "bg-emerald-400", tab: "text-emerald-700", active: "border-emerald-400 text-emerald-700", bg: "bg-emerald-50/60" },
@@ -674,1403 +563,52 @@ const VER_PALETTE = [
   { dot: "bg-violet-400",  tab: "text-violet-700",  active: "border-violet-400 text-violet-700",   bg: "bg-violet-50/60"  },
   { dot: "bg-sky-400",     tab: "text-sky-700",     active: "border-sky-400 text-sky-700",         bg: "bg-sky-50/60"     },
 ]
-const verColor = (idx) => VER_PALETTE[idx % VER_PALETTE.length]
 
-const DEF_VERSION = { id: "ver_001", name: "Base", colorIdx: 0 }
 
-/* ═══════════════════════════════════════════════════════════════
-   TESTS + DICTIONARY  (unchanged — version-independent)
-   ═══════════════════════════════════════════════════════════════ */
 
-const TESTS = [
-  { id:"t01", label:"T01 · Subtração directa",       desc:"Altera Receita → observa Margem e Margem %",                                   targets:["v_rec"] },
-  { id:"t02", label:"T02 · Divisão de dois inputs",  desc:"Altera Volume → observa Rec./un. e Custo/un.",                                 targets:["v_vol"] },
-  { id:"t03", label:"T03 · Transitividade",          desc:"Altera Volume → observa Margem/un. (depende de Rec./un. e Custo/un.)",          targets:["v_vol"] },
-  { id:"t04", label:"T04 · Multiplicação + literal", desc:"Altera Prazo médio → observa Rotação  ( rec × prz / 30 )",                     targets:["v_prz"] },
-  { id:"t05", label:"T05 · PREV auto-referência",    desc:"Altera Receita → observa Saldo Acum. propagar entre períodos",                  targets:["v_rec"] },
-  { id:"t06", label:"T06 · PREV + 2 inputs",         desc:"Altera Receita e Custo → observa Rec. Acumulada em todos os períodos",          targets:["v_rec","v_cus"] },
-  { id:"t07", label:"T07 · SUM_LOBS de input",       desc:"Altera Receita → observa Total Receita (agregação de todos os LOBs)",           targets:["v_rec"] },
-  { id:"t08", label:"T08 · SUM_LOBS composto",       desc:"Altera Receita e Custo → observa Eficiência %  ( SUM_LOBS / SUM_LOBS )",        targets:["v_rec","v_cus"] },
-  { id:"t09", label:"T09 · Input scope Língua",      desc:"Altera Budget → observa Desvio Budget  ( SUM_LOBS − budget )",                  targets:["v_bgt"] },
-  { id:"t10", label:"T10 · SUM_LANGS",               desc:"Altera Receita → observa Receita Global e Margem Global (agregação de línguas)", targets:["v_rec"] },
-  { id:"t11", label:"T11 · Input scope Projeto",     desc:"Altera Target → observa Gap vs. Target  ( SUM_LANGS − target )",               targets:["v_tgt"] },
-  { id:"t12", label:"T12 · Propagação completa",     desc:"Altera Receita → observa toda a cadeia até Margem Global %",                   targets:["v_rec"] },
-  { id:"t13", label:"T13 · Fórmulas alternativas (@)", desc:"Edita Prazo ou Volume → observa Result. Ajustado mudar de fórmula automaticamente", targets:["v_prz","v_vol"] },
-  { id:"t14", label:"T14 · Referências absolutas [lang][lob]", desc:"Altera Receita de PT/Retalho → observa v_idx, v_dif e v_cmp actualizarem com contextos fixos", targets:["v_rec"] },
-]
-
-const DICT = {
-  t01:{what:"Verifica que uma alteração num input se propaga directamente a todas as variáveis que dele dependem por operações de subtração e divisão.",formulas:["v_mar  =  v_rec − v_cus","v_pct  =  (v_rec − v_cus) / v_rec × 100"],steps:["Selecciona T01 na dropdown de testes.","Clica numa célula verde de Receita (v_rec) e altera: 1 000 → 1 200.","Verifica que Margem e Margem % ficam a laranja e reflectem os novos valores."],ctx:"PT/Retalho · Jan",rows:[{l:"Receita  (v_rec)",b:"1 000",a:"1 200",t:"i"},{l:"Custo    (v_cus)",b:"600",a:"600",t:"c"},{l:"Margem   (v_mar)",b:"400",a:"600",t:"x"},{l:"Margem % (v_pct)",b:"40,00 %",a:"50,00 %",t:"x"}],note:"O v_pct usa parênteses — confirma que (v_rec − v_cus) é avaliado antes da divisão."},
-  t02:{what:"Verifica a divisão entre dois inputs distintos da mesma célula de contexto.",formulas:["v_rpu  =  v_rec / v_vol","v_cvu  =  v_cus / v_vol"],steps:["Selecciona T02. Altera Volume: 50 → 40.","Observa Rec./unidade e Custo/unidade a actualizar.","Bónus: altera Volume para 0 → ERR (divisão por zero propaga)."],ctx:"PT/Retalho · Jan",rows:[{l:"Volume       (v_vol)",b:"50",a:"40",t:"i"},{l:"Rec./unidade (v_rpu)",b:"20,00",a:"25,00",t:"x"},{l:"Custo/unid.  (v_cvu)",b:"12,00",a:"15,00",t:"x"}],note:"Volume=0 → v_rpu=ERR → v_mpu=ERR (null propaga, não é mascarado por 0)."},
-  t03:{what:"Verifica que uma alteração num input propaga por duas calculadas intermédias (teste de ordenação topológica).",formulas:["v_rpu = v_rec / v_vol","v_cvu = v_cus / v_vol","v_mpu = v_rpu − v_cvu"],steps:["Selecciona T03. Altera Volume: 50 → 40.","Confirma que os números de sequência mostram v_rpu e v_cvu antes de v_mpu."],ctx:"PT/Retalho · Jan",rows:[{l:"Volume        (v_vol)",b:"50",a:"40",t:"i"},{l:"Rec./unidade  (v_rpu)",b:"20,00",a:"25,00",t:"x"},{l:"Custo/unidade (v_cvu)",b:"12,00",a:"15,00",t:"x"},{l:"Margem/unid.  (v_mpu)",b:"8,00",a:"10,00",t:"x"}],note:"O topoSort garante que v_rpu e v_cvu estão calculados antes de v_mpu usar os seus valores."},
-  t04:{what:"Verifica a multiplicação de dois inputs seguida de divisão por constante literal.",formulas:["v_rot  =  v_rec × v_prz / 30"],steps:["Selecciona T04. Altera Prazo médio: 30 → 45.","Observa Rotação: 1 000 × 45 / 30 = 1 500."],ctx:"PT/Retalho · Jan",rows:[{l:"Prazo médio (v_prz)",b:"30",a:"45",t:"i"},{l:"Rotação     (v_rot)",b:"1 000",a:"1 500",t:"x"}],note:"Precedência: × e / avaliados da esquerda para a direita: (v_rec × v_prz) / 30."},
-  t05:{what:"Verifica que PREV() lê o período anterior e que alterações propagam em cascata por todos os períodos seguintes.",formulas:["v_sal  =  PREV(v_sal) + v_mar","(período inexistente → 0)"],steps:["Selecciona T05. Altera Receita de Jan: 1 000 → 1 500.","Observa Saldo: Jan→Fev→Mar propagam em cascata."],ctx:"PT/Retalho · todos os períodos",rows:[{l:"Saldo Jan (v_sal)",b:"400",a:"900",t:"x"},{l:"Saldo Fev (v_sal)",b:"900",a:"1 400",t:"x"},{l:"Saldo Mar (v_sal)",b:"1 300",a:"1 800",t:"x"}],note:"Período anterior inexistente → 0. ERR no período anterior → null propaga (não usa 0)."},
-  t06:{what:"Verifica PREV com dois inputs directos na mesma fórmula (sem calculada intermédia).",formulas:["v_acm  =  PREV(v_acm) + v_rec − v_cus"],steps:["Selecciona T06. Altera Receita Jan: 1 000 → 1 500.","Verifica cascata: Acm Jan=900, Fev=1400, Mar=1800."],ctx:"PT/Retalho · todos os períodos",rows:[{l:"Acm. Jan (v_acm)",b:"400",a:"900",t:"x"},{l:"Acm. Fev (v_acm)",b:"900",a:"1 400",t:"x"},{l:"Acm. Mar (v_acm)",b:"1 300",a:"1 800",t:"x"}],note:"Diferença de T05: acumula directamente v_rec−v_cus, sem variável intermédia."},
-  t07:{what:"Verifica que SUM_LOBS agrega todos os LOBs de uma língua para um input.",formulas:["v_trc  =  SUM_LOBS(v_rec)"],steps:["Selecciona T07. Altera Receita PT/Retalho Jan: 1 000 → 1 300.","Observa Total Receita PT Jan: 3 000 → 3 300.","Altera EN e confirma que PT não é afectado."],ctx:"PT · Jan",rows:[{l:"Rec. PT/Retalho",b:"1 000",a:"1 300",t:"i"},{l:"Total Receita PT",b:"3 000",a:"3 300",t:"x"}],note:"SUM_LOBS usa ctx.lid — alteração em PT não contamina EN."},
-  t08:{what:"Verifica expressão com SUM_LOBS() como numerador e denominador.",formulas:["v_eff  =  SUM_LOBS(v_mar) / SUM_LOBS(v_rec) × 100"],steps:["Selecciona T08. Altera Receita PT/Retalho Jan: 1 000 → 1 500.","Eficiência PT Jan: 40% → 48,57%."],ctx:"PT · Jan",rows:[{l:"∑ Margem PT",b:"1 200",a:"1 700",t:"x"},{l:"∑ Receita PT",b:"3 000",a:"3 500",t:"x"},{l:"Eficiência %",b:"40,00 %",a:"48,57 %",t:"x"}],note:"Dois nós SumL distintos na mesma AST — avaliados independentemente."},
-  t09:{what:"Verifica referência directa a input do mesmo scope na fórmula.",formulas:["v_dev  =  SUM_LOBS(v_mar) − v_bgt"],steps:["Selecciona T09. Altera Budget PT Jan: 400 → 700.","Desvio PT Jan: 800 → 500."],ctx:"PT · Jan",rows:[{l:"Budget PT (v_bgt)",b:"400",a:"700",t:"i"},{l:"Desvio PT (v_dev)",b:"800",a:"500",t:"x"}],note:"v_bgt tem scope=language — instância por língua, isolado por ctx.lid."},
-  t10:{what:"Verifica que SUM_LANGS agrega todas as línguas para o scope Projeto.",formulas:["v_gbl = SUM_LANGS(v_tot)","v_tgr = SUM_LANGS(v_trc)"],steps:["Selecciona T10. Altera Receita de qualquer LOB.","Observa a cadeia LOB → Língua → Projeto."],ctx:"Projeto · Jan",rows:[{l:"Total Margem PT",b:"1 200",a:"1 700",t:"x"},{l:"Margem Global",b:"1 400",a:"1 900",t:"x"}],note:"SUM_LANGS ocorre depois de todas as fases Língua — valores já calculados."},
-  t11:{what:"Verifica referência a input de scope Projeto (análogo a T09 no nível Projeto).",formulas:["v_gap  =  SUM_LANGS(v_tot) − v_tgt"],steps:["Selecciona T11. Altera Target Jan: 700 → 900.","Gap Jan: 700 → 500. Nenhuma outra variável muda."],ctx:"Projeto · Jan",rows:[{l:"Target  (v_tgt)",b:"700",a:"900",t:"i"},{l:"Gap vs. Target",b:"700",a:"500",t:"x"}],note:"v_tgt tem scope=template — instância única. Alteração afecta apenas v_gap."},
-  t12:{what:"Teste de integração — propagação completa desde input LOB até ao topo.",formulas:["v_rec → LOB (8 vars) → Língua (4 vars) → Projeto (4 vars)"],steps:["Selecciona T12. Altera Receita PT/Retalho Jan: 1 000 → 1 300.","Conta os números de sequência → expectativa: 15 variáveis numeradas.","v_gmg e v_gap (topo) devem estar a laranja."],ctx:"Toda a hierarquia",rows:[{l:"Rec. PT/Ret (v_rec)",b:"1 000",a:"1 300",t:"i"},{l:"Margem Global %",b:"40,00 %",a:"42,50 %",t:"x"},{l:"Gap vs. Target",b:"700",a:"1 000",t:"x"}],note:"15 variáveis a laranja validam o motor end-to-end."},
-  t13:{
-    what:"Verifica que uma variável pode ter fórmulas distintas consoante o último input editado. O mecanismo @ selecciona a fórmula em runtime com base no activeTriggerId guardado na célula.",
-    formulas:[
-      "@ v_prz  :  v_mar − v_mar × v_prz / 100   (margem com penalidade de prazo)",
-      "@ v_vol  :  v_mar × v_vol / 50             (margem escalonada por volume)",
-      "default  :  v_mar                           (sem trigger activo)",
-    ],
-    steps:[
-      "Selecciona T13. Dois inputs ficam a verde: Prazo médio (v_prz) e Volume (v_vol).",
-      "Edita Prazo PT/Retalho Jan: 30 → 60. Result. Ajustado muda para v_mar−v_mar×60/100 = 400−240 = 160. A célula fica a violeta.",
-      "Edita agora Volume PT/Retalho Jan: 50 → 100. Result. Ajustado muda para v_mar×100/50 = 800. O trigger activo muda de v_prz para v_vol.",
-      "Hover na célula violeta → tooltip mostra qual trigger está activo e a fórmula em uso.",
-      "Verifica que os outros períodos (Fev, Mar) também actualizaram com o novo trigger.",
-    ],
-    ctx:"PT/Retalho · Jan",
-    rows:[
-      {l:"Prazo médio (v_prz)",b:"30",a:"60",t:"i"},
-      {l:"Margem      (v_mar)",b:"400",a:"400",t:"c"},
-      {l:"Result. Aj. — trigger v_prz",b:"400 (default)",a:"160",t:"x"},
-      {l:"--- depois edita Volume ---",b:"",a:"",t:"c"},
-      {l:"Volume (v_vol)",b:"50",a:"100",t:"i"},
-      {l:"Result. Aj. — trigger v_vol",b:"160",a:"800",t:"x"},
-    ],
-    note:"O trigger não muda sozinho — só muda quando o utilizador edita um input que é trigger desta variável. Editar v_rec ou v_cus não altera o trigger activo; apenas actualiza v_mar que é usado pela fórmula já activa.",
-  },
-  t14:{
-    what:"Verifica o mecanismo de referências absolutas com qualificadores [lang][lob]. Uma fórmula pode fixar a língua e/ou o LOB de uma referência, independentemente do contexto da célula que está a ser calculada — equivalente a uma referência absoluta no Excel.",
-    formulas:[
-      "v_idx  =  v_rec / v_rec[PT][ret] * 100      (LOB scope — base PT/Retalho)",
-      "v_dif  =  v_tot − v_tot[PT]                 (Language scope — desvio vs PT)",
-      "v_cmp  =  v_tot[PT] / v_tot[EN] * 100       (Template scope — rácio PT/EN)",
-    ],
-    steps:[
-      "Selecciona T14. A variável Receita (v_rec) fica a verde.",
-      "Valores iniciais: v_idx PT/Ret=100, PT/Emp=200, EN/Retail=50 | v_dif PT=0, EN=−1000 | v_cmp=600.",
-      "Altera Receita PT/Retalho Jan: 1 000 → 1 500.",
-      "v_idx PT/Ret continua 100 (é o denominador dela própria). v_idx PT/Emp=133,33. v_idx EN=33,33.",
-      "v_cmp muda: v_tot[PT] aumenta → rácio PT/EN aumenta.",
-      "v_dif PT mantém 0 (v_tot − v_tot[PT] = self−self). v_dif EN torna-se mais negativo.",
-    ],
-    ctx:"PT/Retalho · Jan (dados iniciais)",
-    rows:[
-      {l:"v_rec PT/Retalho",b:"1 000",a:"1 500",t:"i"},
-      {l:"v_idx PT/Retalho  (self/self×100)",b:"100,00",a:"100,00",t:"c"},
-      {l:"v_idx PT/Empresas (2000/1000×100)",b:"200,00",a:"133,33",t:"x"},
-      {l:"v_idx EN/Retail   (500/1000×100)", b:"50,00", a:"33,33", t:"x"},
-      {l:"v_dif PT  (tot_PT−tot_PT)",        b:"0,00",  a:"0,00",  t:"c"},
-      {l:"v_dif EN  (tot_EN−tot_PT)",        b:"−1 000",a:"−1 500",t:"x"},
-      {l:"v_cmp    (tot_PT/tot_EN×100)",     b:"600,00",a:"850,00",t:"x"},
-    ],
-    note:"Editar Receita de EN/Retail não afecta v_idx PT/Emp nem v_dif PT — as referências absolutas isolam os contextos. É o comportamento-chave a validar: [PT][ret] aponta sempre para a mesma célula independentemente de onde a fórmula está a ser avaliada.",
-  },
+function verColor(idx = 0) {
+  return VER_PALETTE[idx % VER_PALETTE.length]
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   SCOPE CONFIG
-   ═══════════════════════════════════════════════════════════════ */
+
+const MONTHS_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+
+const isInput = v => v.isInput === true || (v.formula == null && (!v.alternatives || v.alternatives.length === 0))
+
+const isCellLocked = (ver, period) => {
+  if (!ver) return false
+  if (ver.isLocked) return 'locked'
+  return false
+}
+
 
 const SC = {
-  lob:      { label: "LOB",     badge: "bg-sky-100 text-sky-700",          bg: "bg-sky-50/40" },
-  language: { label: "Língua",  badge: "bg-emerald-100 text-emerald-700",  bg: "bg-emerald-50/40" },
-  project: { label: "Projeto", badge: "bg-amber-100 text-amber-700",      bg: "bg-amber-50/40" },
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   COMPONENTS
-   ═══════════════════════════════════════════════════════════════ */
-
-function OrderBadge({ n }) {
-  if (n == null) return null
-  return (
-    <div className={`absolute top-0 right-0 flex items-center justify-center rounded-full bg-indigo-500 text-white font-bold leading-none shadow-md border-2 border-white z-10 ${n > 9 ? "min-w-[22px] h-[18px] px-1 text-[9px]" : "w-[18px] h-[18px] text-[10px]"}`}>
-      {n}
-    </div>
-  )
-}
-
-function EditableCell({ value, onChange, dirty, toEdit, locked }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState("")
-
-  // Célula bloqueada — mostra valor sem interacção
-  if (locked) return (
-    <div className="relative px-3 py-2 text-right text-sm font-mono text-gray-400 cursor-not-allowed select-none"
-         title={locked === "past" ? "Período passado — não editável" : "Versão bloqueada — não editável"}>
-      {value != null
-        ? <span>{fmtV(value)}</span>
-        : <span className="text-gray-200 text-xs font-sans">—</span>
-      }
-      <span className="absolute top-0.5 right-0.5 text-[8px] text-gray-300">🔒</span>
-    </div>
-  )
-
-  if (editing) return (
-    <input className="w-full px-3 py-2 text-right text-sm bg-sky-50 border-2 border-sky-400 outline-none font-mono"
-      value={draft} autoFocus onChange={e => setDraft(e.target.value)}
-      onBlur={() => { const n = parseFloat(draft.replace(",", ".")); onChange(isNaN(n) ? null : n); setEditing(false) }}
-      onKeyDown={e => { if (e.key === "Enter") { const n = parseFloat(draft.replace(",", ".")); onChange(isNaN(n) ? null : n); setEditing(false) } if (e.key === "Escape") setEditing(false) }}
-    />
-  )
-  const bg = dirty ? "bg-orange-100 hover:bg-orange-200/70" : toEdit ? "bg-green-50 hover:bg-green-100/70" : "hover:bg-white/80"
-  return (
-    <div onClick={() => { setDraft(value != null ? String(value) : ""); setEditing(true) }}
-      className={`relative px-3 py-2 text-right text-sm font-mono cursor-pointer transition-all group ${bg}`}>
-      {dirty  && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-orange-400" />}
-      {!dirty && toEdit && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
-      {value != null
-        ? <span className={dirty ? "text-orange-800 font-semibold" : toEdit ? "text-green-800 font-semibold" : "text-gray-800"}>{fmtV(value)}</span>
-        : <span className="text-gray-300 text-xs font-sans opacity-0 group-hover:opacity-100">—</span>
-      }
-    </div>
-  )
-}
-
-function CalcCell({ value, formula, altFormula, activeTriggerId, dirty, status }) {
-  const [tip, setTip] = useState(false)
-  const displayFm = altFormula ?? formula
-  const isCircular = status === "circular"
-  const isErr = !isCircular && value === null && displayFm != null
-  return (
-    <div onMouseEnter={() => setTip(true)} onMouseLeave={() => setTip(false)}
-      className={`relative px-3 py-2 text-right text-sm font-mono select-none transition-all ${dirty ? "bg-orange-50" : ""}`}>
-      {dirty && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-orange-400" />}
-      {isCircular
-        ? <span className="text-purple-600 text-xs font-sans font-bold" title="Dependência circular">CIRC</span>
-        : isErr
-        ? <span className="text-red-500 text-xs font-sans font-semibold">ERR</span>
-        : value != null
-          ? <span className={dirty ? "text-orange-700 font-semibold" : altFormula ? "text-violet-600" : "text-gray-500"}>{fmtV(value)}</span>
-          : <span className="text-gray-300 text-xs font-sans">—</span>
-      }
-      {tip && displayFm && (
-        <div className="absolute right-0 top-full mt-1 z-30 bg-gray-900 text-xs px-3 py-2 rounded-lg shadow-xl whitespace-nowrap pointer-events-none border border-gray-700">
-          {altFormula && <span className="text-violet-400 mr-1.5">@ {activeTriggerId} :</span>}
-          <span className="text-emerald-400 font-mono">{displayFm}</span>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function DeltaCell({ valueA, valueB }) {
-  if (valueA == null || valueB == null) {
-    return <div className="px-2 py-2 text-center text-gray-300 text-sm select-none font-mono">—</div>
-  }
-  const d = valueB - valueA
-  if (!isFinite(d)) return <div className="px-2 py-2 text-center text-red-400 text-xs font-sans select-none">ERR</div>
-  if (Math.abs(d) < 0.005) return <div className="px-2 py-2 text-right text-sm font-mono text-gray-400 select-none">0</div>
-  const pos = d > 0
-  return (
-    <div className={`px-2 py-2 text-right text-sm font-mono font-semibold select-none ${pos ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
-      {pos ? "+" : ""}{fmtV(d)}
-    </div>
-  )
-}
-
-function Badge({ scope }) {
-  return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${SC[scope].badge}`}>{SC[scope].label}</span>
-}
-
-/* ── Version Tab ────────────────────────────────────────────── */
-
-
-/* ═══════════════════════════════════════════════════════════════
-   TEMPLATE MODAL — define o template: nome, descrição e variáveis
-   ═══════════════════════════════════════════════════════════════ */
-
-function TemplateModal({ initialTemplateId, onClose, onEditVar, onAddVar }) {
-  const [allTemplates, setAllTemplates] = useState([])
-  const [activeId,     setActiveId]     = useState(initialTemplateId ?? null)
-  const [vars,         setVars]         = useState([])
-  const [name,         setName]         = useState("")
-  const [desc,         setDesc]         = useState("")
-  const [loading,      setLoading]      = useState(true)
-  const [loadingVars,  setLoadingVars]  = useState(false)
-  const [saving,       setSaving]       = useState(false)
-  const [deleting,     setDeleting]     = useState(false)
-
-  // Load all templates on mount
-  useEffect(() => {
-    api.get('/admin/templates')
-      .then(tpls => {
-        setAllTemplates(tpls)
-        const first = initialTemplateId
-          ? tpls.find(t => t.templateId === initialTemplateId)
-          : tpls[0]
-        if (first) {
-          setActiveId(first.templateId)
-          setName(first.name)
-          setDesc(first.description ?? "")
-        }
-      })
-      .catch(e => console.error(e))
-      .finally(() => setLoading(false))
-  }, [])
-
-  // Load variables when active template changes
-  useEffect(() => {
-    if (!activeId) return
-    setLoadingVars(true)
-    api.get(`/templates/${activeId}/variables`)
-      .then(data => {
-        const apiVars = data ?? []
-        setVars(apiVars.map(v => ({
-          id: v.code,
-          name: v.name,
-          scope: v.scopeCode,
-          isInput: v.isInput,
-          formula: v.formulas?.find(f => f.formulaType === "main")?.expression ?? null,
-          alternatives: (v.formulas ?? []).filter(f => f.formulaType === "alternative").length,
-          _apiId: v.variableId
-        })))
-      })
-      .catch(e => console.error(e))
-      .finally(() => setLoadingVars(false))
-  }, [activeId])
-
-  const switchTemplate = (idStr) => {
-    const id = parseInt(idStr)
-    const tpl = allTemplates.find(t => t.templateId === id)
-    if (!tpl) return
-    setActiveId(id)
-    setName(tpl.name)
-    setDesc(tpl.description ?? "")
-    setVars([])
-  }
-
-  const handleSave = async () => {
-    if (!activeId || !name.trim()) return
-    setSaving(true)
-    try {
-      const updated = await api.put(`/admin/templates/${activeId}`, { code: "", name: name.trim(), description: desc })
-      setAllTemplates(prev => prev.map(t => t.templateId === activeId ? {...t, name: updated.name, description: updated.description} : t))
-    } catch(e) { alert('Erro ao guardar: ' + e.message) }
-    finally { setSaving(false) }
-  }
-
-  const handleNew = async () => {
-    try {
-      const created = await api.post('/admin/templates', { code: `tpl_${Date.now()}`, name: "Novo Template", description: "" })
-      setAllTemplates(prev => [...prev, created])
-      setActiveId(created.templateId)
-      setName(created.name)
-      setDesc(created.description ?? "")
-      setVars([])
-    } catch(e) { alert('Erro ao criar: ' + e.message) }
-  }
-
-  const handleDelete = async () => {
-    try {
-      await api.delete(`/admin/templates/${activeId}`)
-      const remaining = allTemplates.filter(t => t.templateId !== activeId)
-      setAllTemplates(remaining)
-      if (remaining.length > 0) {
-        const next = remaining[0]
-        setActiveId(next.templateId)
-        setName(next.name)
-        setDesc(next.description ?? "")
-        setVars([])
-      } else {
-        onClose()
-      }
-    } catch(e) { alert('Erro ao eliminar: ' + e.message) }
-    finally { setDeleting(false) }
-  }
-
-  const activeTemplate = allTemplates.find(t => t.templateId === activeId)
-  const scopeOrder = ["lob","language","project"]
-  const grouped    = scopeOrder.map(s => ({ scope: s, vars: vars.filter(v => v.scope === s) }))
-
-  const SC = {
-    lob:      { label:"LOB",      bg:"bg-blue-50/40" },
-    language: { label:"Language", bg:"bg-amber-50/40" },
-    project:  { label:"Project",  bg:"bg-emerald-50/40" }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col border border-gray-100">
-
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center text-white text-xs">∑</div>
-            <h2 className="font-bold text-gray-800">Definição do Template</h2>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
-        </div>
-
-        {/* Template navigator */}
-        <div className="px-6 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 shrink-0">
-          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide shrink-0">Template</span>
-          <div className="relative flex-1">
-            <select value={activeId ?? ''} onChange={e=>switchTemplate(e.target.value)}
-              disabled={loading}
-              className="w-full pl-3 pr-8 py-1.5 border border-gray-200 rounded-lg text-sm bg-white
-                         focus:outline-none focus:border-sky-400 appearance-none disabled:opacity-50">
-              {allTemplates.map(t=>(
-                <option key={t.templateId} value={t.templateId}>{t.name}</option>
-              ))}
-            </select>
-            <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none"
-                 viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
-            </svg>
-          </div>
-          <button onClick={handleNew}
-            className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-medium shrink-0 transition-colors">
-            + Novo
-          </button>
-          {activeId && (
-            <button onClick={()=>setDeleting(true)}
-              className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium shrink-0 transition-colors">
-              Eliminar
-            </button>
-          )}
-        </div>
-
-        {loading ? (
-          <div className="flex-1 flex items-center justify-center text-sm text-gray-400">A carregar...</div>
-        ) : !activeId ? (
-          <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Sem templates. Cria um novo.</div>
-        ) : (
-          <>
-            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-              {/* Metadata */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Template</label>
-                  <input value={name} onChange={e => setName(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
-                    placeholder="Template Standard"/>
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Descrição</label>
-                  <input value={desc} onChange={e => setDesc(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400"
-                    placeholder="Descrição opcional"/>
-                </div>
-              </div>
-
-              {/* Scope badge + var count */}
-              <div className="flex items-center gap-3">
-                {grouped.filter(g=>g.vars.length>0).map(g=>(
-                  <span key={g.scope} className="text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded-lg border border-blue-100 font-medium">
-                    {SC[g.scope]?.label ?? g.scope}
-                  </span>
-                ))}
-                <span className="text-xs text-gray-400">
-                  {loadingVars ? 'A carregar variáveis...' : `${vars.length} variáveis`}
-                </span>
-              </div>
-
-              {/* Variables by scope */}
-              {loadingVars ? (
-                <div className="text-sm text-gray-400 text-center py-4">A carregar...</div>
-              ) : (
-                <div className="border border-gray-100 rounded-xl overflow-hidden">
-                  {grouped.filter(g=>g.vars.length>0).map(({ scope, vars: sv }) => (
-                    <div key={scope}>
-                      <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-100">
-                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{SC[scope]?.label ?? scope}</span>
-                        <span className="text-xs text-gray-300">{sv.length}</span>
-                      </div>
-                      {sv.map(v => {
-                        const isInput = v.isInput
-                        return (
-                          <div key={v.id} className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 group">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-semibold text-sm text-gray-800">{v.name}</span>
-                                <span className="text-xs font-mono text-gray-400">{v.id}</span>
-                                {isInput
-                                  ? <span className="text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-500">input</span>
-                                  : v.alternatives > 0
-                                    ? <span className="text-xs bg-violet-50 px-1.5 py-0.5 rounded border border-violet-200 text-violet-600">{v.alternatives} alt.</span>
-                                    : null
-                                }
-                              </div>
-                              {!isInput && v.formula && (
-                                <p className="text-xs font-mono text-gray-400 mt-0.5 truncate" title={v.formula}>{v.formula}</p>
-                              )}
-                            </div>
-                            <button onClick={() => onEditVar({
-                                id:           v.id,
-                                name:         v.name,
-                                scope:        v.scope,
-                                isInput:      v.isInput,
-                                formula:      v.formula,
-                                groupId:      v.groupId ?? null,
-                                alternatives: v.alternatives ? Array(v.alternatives).fill({trigger:'',formula:''}) : [],
-                                _apiId:       v._apiId,
-                                templateId:   activeId
-                              })}
-                              className="text-gray-300 hover:text-sky-500 text-sm w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white transition-all shrink-0 opacity-0 group-hover:opacity-100">✎</button>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ))}
-                  {vars.length === 0 && !loadingVars && (
-                    <p className="text-sm text-gray-400 text-center py-6">Sem variáveis. Adiciona a primeira.</p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
-              <button onClick={()=>onAddVar(activeId)}
-                className="px-4 py-2 text-sm text-sky-600 hover:text-sky-800 font-semibold transition-colors">
-                + Adicionar variável
-              </button>
-              <div className="flex gap-2">
-                <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
-                <button onClick={handleSave} disabled={saving||!name.trim()}
-                  className="px-5 py-2 bg-gray-900 text-white text-sm rounded-xl hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium">
-                  {saving ? 'A guardar...' : 'Guardar Template'}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Delete confirm */}
-      {deleting && (
-        <>
-          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setDeleting(false)}/>
-          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
-                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
-            <p className="font-semibold text-gray-800 mb-1">Eliminar template?</p>
-            <p className="text-sm text-gray-400 mb-5 truncate">{activeTemplate?.name}</p>
-            <div className="flex gap-3">
-              <button onClick={()=>setDeleting(false)}
-                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
-                Cancelar
-              </button>
-              <button onClick={handleDelete}
-                className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">
-                Eliminar
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  )
+  lob:      { label: 'LOB',      badge: 'bg-blue-100 text-blue-700',    bg: 'bg-blue-50/40'    },
+  language: { label: 'Language', badge: 'bg-amber-100 text-amber-700',  bg: 'bg-amber-50/40'   },
+  project:  { label: 'Project',  badge: 'bg-emerald-100 text-emerald-700', bg: 'bg-emerald-50/40' },
 }
 
 
-/* ═══════════════════════════════════════════════════════════════
-   PROJECT LIST PANEL + PROJECT MODAL
-   ═══════════════════════════════════════════════════════════════ */
-function ProjectListPanel({ allProjects, templates, onEdit, onCreate, onDelete, onClose }) {
-  const [confirmDelete, setConfirmDelete] = useState(null)
-
-  return (
-    <>
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50" onClick={onClose}/>
-      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50
-                      bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col border border-gray-100">
-
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
-            <h2 className="font-bold text-gray-800">Projectos</h2>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={onCreate}
-              className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold transition-colors">
-              + Novo
-            </button>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-2">
-          {allProjects.map(p => {
-            const tpl = templates.find(t => t.id === `tpl_${p.templateId}`)
-            return (
-              <div key={p.projectId}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors">
-                <div className="flex-1 min-w-0">
-                  <span className="font-semibold text-sm text-gray-800 truncate block">{p.name}</span>
-                  <p className="text-xs text-gray-400 mt-0.5 truncate">Template: {tpl?.name ?? `#${p.templateId}`}</p>
-                </div>
-                <div className="flex gap-2 shrink-0">
-                  <button onClick={()=>onEdit(p.projectId)}
-                    className="text-xs px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-lg font-medium transition-colors">
-                    Editar
-                  </button>
-                  <button onClick={()=>setConfirmDelete(p)}
-                    className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium transition-colors">
-                    Eliminar
-                  </button>
-                </div>
-              </div>
-            )
-          })}
-          {allProjects.length === 0 && (
-            <p className="text-sm text-gray-400 text-center py-8">Sem projectos criados.</p>
-          )}
-        </div>
-      </div>
-
-      {confirmDelete && (
-        <>
-          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setConfirmDelete(null)}/>
-          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60]
-                          bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
-            <p className="font-semibold text-gray-800 mb-1">Eliminar projecto?</p>
-            <p className="text-sm text-gray-400 mb-1 truncate">{confirmDelete.name}</p>
-            <p className="text-xs text-red-400 mb-5">Todas as versões e células serão eliminadas.</p>
-            <div className="flex gap-3">
-              <button onClick={()=>setConfirmDelete(null)}
-                className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">
-                Cancelar
-              </button>
-              <button onClick={()=>{ onDelete(confirmDelete.projectId); setConfirmDelete(null) }}
-                className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">
-                Eliminar
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </>
-  )
+const fmtPeriod = (p) => {
+  const y = Math.floor(p / 100), m = p % 100
+  return `${MONTHS_PT[m - 1]} ${y}`
 }
 
-function ProjectModal({ project, templates: templatesProp, isNew, onSave, onClose }) {
-  const [name,       setName]       = useState(project?.name ?? '')
-  const [templateId, setTemplateId] = useState(project?.templateId ?? '')
-  const [langs,      setLangs]      = useState(() =>
-    (project?.languages ?? []).map(l => ({ ...l, lobs: (l.lobs ?? []).map(b => ({ ...b })) }))
-  )
-  const [expandedLangs, setExpandedLangs] = useState(new Set((project?.languages ?? []).map(l => l.id)))
-  const [errors,   setErrors]   = useState({})
-  const [templates, setTemplates] = useState(templatesProp ?? [])
-  const [loadingStruct, setLoadingStruct] = useState(false)
-  const idCtr = useRef(1000)
-  const newId  = prefix => `${prefix}_${String(idCtr.current++).padStart(3,"0")}`
-
-  // Load templates from API if not provided
-  useEffect(() => {
-    if (!templatesProp?.length) {
-      api.get('/admin/templates')
-        .then(tpls => setTemplates(tpls.map(t => ({ id: `tpl_${t.templateId}`, name: t.name }))))
-        .catch(e => console.error(e))
-    }
-  }, [])
-
-  // Load project structure from API for non-active projects
-  useEffect(() => {
-    if (!isNew && project?.id && (!project.languages || project.languages.length === 0)) {
-      const rawId = parseInt((project.id ?? '').replace('c_',''))
-      if (!rawId) return
-      setLoadingStruct(true)
-      api.get(`/projects/${rawId}/structure`)
-        .then(data => {
-          const ls = (data.languages ?? []).map(l => ({
-            id: `l_${l.languageId}`, code: l.code, name: l.name,
-            lobs: (l.lobs ?? []).map(b => ({ id: `b_${b.lobId}`, code: b.code, name: b.name }))
-          }))
-          setLangs(ls)
-          setExpandedLangs(new Set(ls.map(l => l.id)))
-        })
-        .catch(e => console.error('Load structure:', e))
-        .finally(() => setLoadingStruct(false))
-    }
-  }, [project?.id])
-
-  const templateChanged = templateId !== project?.templateId
-  const selectedTpl     = templates.find(t => t.id === templateId)
-
-  const addLang    = () => { const id=newId("l"); setLangs(p=>[...p,{id,code:"",name:"",lobs:[]}]); setExpandedLangs(p=>new Set([...p,id])) }
-  const removeLang = id => { setLangs(p=>p.filter(l=>l.id!==id)); setExpandedLangs(p=>{const n=new Set(p);n.delete(id);return n}) }
-  const updateLang = (id,f,v) => setLangs(p=>p.map(l=>l.id===id?{...l,[f]:v}:l))
-  const toggleLang = id => setExpandedLangs(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n})
-  const addLob    = lid => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:[...l.lobs,{id:newId("b"),code:"",name:""}]}:l))
-  const removeLob = (lid,bid) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.filter(b=>b.id!==bid)}:l))
-  const updateLob = (lid,bid,f,v) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.map(b=>b.id===bid?{...b,[f]:v}:b)}:l))
-
-  const validate = () => {
-    const e = {}
-    if (!name.trim())  e.name = "Obrigatório"
-    if (!templateId)   e.tpl  = "Selecciona um template"
-    langs.forEach((l,li) => {
-      if (!l.code.trim()) e[`lc${li}`] = "Obrigatório"
-      if (!l.name.trim()) e[`ln${li}`] = "Obrigatório"
-      l.lobs.forEach((b,bi) => {
-        if (!b.code.trim()) e[`bc${li}${bi}`] = "Obrigatório"
-        if (!b.name.trim()) e[`bn${li}${bi}`] = "Obrigatório"
-      })
-    })
-    setErrors(e); return Object.keys(e).length === 0
-  }
-
-  const handleSave = () => { if (validate()) onSave({ ...(project ?? {}), name:name.trim(), templateId, languages:langs }) }
-
-  const inp = (val, onChange, placeholder, ek, cls="") => (
-    <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-      className={`border rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-400 bg-white transition-colors
-        ${errors[ek]?"border-red-300":"border-gray-200"} ${cls}`}/>
-  )
-
-  const removedLangs = (project?.languages ?? []).filter(l=>!langs.find(nl=>nl.id===l.id)).length
-  const removedLobs  = (project?.languages ?? []).flatMap(l=>l.lobs ?? []).filter(b=>!langs.flatMap(l=>l.lobs).find(nb=>nb.id===b.id)).length
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col border border-gray-100">
-
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            {!isNew && (
-              <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm flex items-center gap-1 hover:bg-gray-100 px-2 py-1 rounded-lg">
-                ← Lista
-              </button>
-            )}
-            <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
-            <h2 className="font-bold text-gray-800">{isNew ? 'Novo Projecto' : 'Configuração do Projecto'}</h2>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Projecto</label>
-              {inp(name, setName, "Acme Corp", "name", "w-full")}
-              {errors.name && <p className="text-red-500 text-xs mt-1">{errors.name}</p>}
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Template associado</label>
-              <div className="relative">
-                <select value={templateId} onChange={e=>setTemplateId(e.target.value)}
-                  className={`w-full border rounded-lg pl-3 pr-8 py-2 text-sm outline-none focus:border-sky-400 bg-white appearance-none
-                    ${errors.tpl?"border-red-300":"border-gray-200"}`}>
-                  <option value="">— selecciona —</option>
-                  {templates.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-                <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
-              </div>
-              {errors.tpl && <p className="text-red-500 text-xs mt-1">{errors.tpl}</p>}
-            </div>
-          </div>
-
-          {templateChanged && !isNew && (
-            <div className="flex gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-              <span className="text-amber-500 shrink-0">⚠</span>
-              <p className="text-sm text-amber-800">Mudar o template irá repor todos os valores.</p>
-            </div>
-          )}
-
-          {loadingStruct && (
-            <p className="text-sm text-gray-400 text-center py-4">A carregar estrutura...</p>
-          )}
-
-          {(removedLangs > 0 || removedLobs > 0) && (
-            <div className="flex gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-              <span className="text-red-500 shrink-0">⚠</span>
-              <p className="text-sm text-red-800">
-                {removedLangs > 0 && `${removedLangs} língua(s)`}
-                {removedLangs > 0 && removedLobs > 0 && " e "}
-                {removedLobs > 0 && `${removedLobs} LOB(s)`}
-                {" removidos — os valores correspondentes serão apagados."}
-              </p>
-            </div>
-          )}
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Línguas & LOBs</label>
-              <button onClick={addLang} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Língua</button>
-            </div>
-            {langs.map((l, li) => (
-              <div key={l.id} className="border border-gray-200 rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border-b border-gray-100">
-                  <button onClick={()=>toggleLang(l.id)} className="text-gray-400 hover:text-gray-600 text-xs w-5">
-                    {expandedLangs.has(l.id) ? '▾' : '▸'}
-                  </button>
-                  {inp(l.code, v=>updateLang(l.id,'code',v), "Código", `lc${li}`, "w-20 font-mono")}
-                  {inp(l.name, v=>updateLang(l.id,'name',v), "Nome da língua", `ln${li}`, "flex-1")}
-                  <button onClick={()=>removeLang(l.id)} className="text-red-400 hover:text-red-600 text-lg leading-none ml-1">×</button>
-                </div>
-                {expandedLangs.has(l.id) && (
-                  <div className="p-3 space-y-2">
-                    {l.lobs.map((b, bi) => (
-                      <div key={b.id} className="flex items-center gap-2 pl-6">
-                        <span className="text-gray-300 text-xs">└</span>
-                        {inp(b.code, v=>updateLob(l.id,b.id,'code',v), "Cód.", `bc${li}${bi}`, "w-20 font-mono")}
-                        {inp(b.name, v=>updateLob(l.id,b.id,'name',v), "Nome do LOB", `bn${li}${bi}`, "flex-1")}
-                        <button onClick={()=>removeLob(l.id,b.id)} className="text-red-400 hover:text-red-600 text-lg leading-none">×</button>
-                      </div>
-                    ))}
-                    <button onClick={()=>addLob(l.id)} className="text-xs text-gray-400 hover:text-gray-600 pl-6 font-medium">+ LOB</button>
-                  </div>
-                )}
-              </div>
-            ))}
-            {langs.length === 0 && (
-              <p className="text-sm text-gray-400 text-center py-3">Sem línguas. Adiciona a primeira.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-3 shrink-0">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
-          <button onClick={handleSave}
-            className="px-5 py-2 bg-sky-600 text-white text-sm rounded-xl hover:bg-sky-700 transition-colors font-semibold">
-            {isNew ? 'Criar Projecto' : 'Guardar Projecto'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
+const fmtNum = (v, decimals = 2) => {
+  if (v == null) return '—'
+  return v.toLocaleString('pt-PT', { minimumFractionDigits: 0, maximumFractionDigits: decimals })
 }
 
-
-/* ═══════════════════════════════════════════════════════════════
-   VAR MODAL — criar / editar variável
-   ═══════════════════════════════════════════════════════════════ */
-function VarModal({ variable, variables, client, onSave, onClose, onDelete }) {
-  // variable = null (new) or { id, name, scope, isInput, formula, alternatives, groupId, _apiId, templateId }
-  const isNew  = !variable
-  const SCOPES = ['lob','language','project']
-
-  const [name,         setName]        = useState(variable?.name         ?? '')
-  const [code,         setCode]        = useState(variable?.id           ?? '')
-  const [scope,        setScope]       = useState(variable?.scope        ?? 'lob')
-  const [isInput,      setIsInput]     = useState(variable?.isInput      ?? false)
-  const [formula,      setFormula]     = useState(variable?.formula      ?? '')
-  const [groupId,      setGroupId]     = useState(variable?.groupId      ?? null)
-  const [altList,      setAltList]     = useState(() =>
-    (variable?.alternatives ?? []).map?.((a,i) => typeof a === 'object'
-      ? { ...a, _key: i }
-      : { trigger:'', formula:'', _key: i }
-    ) ?? []
-  )
-  const [groups,       setGroups]      = useState([])
-  const [errors,       setErrors]      = useState({})
-
-  // Load variable groups for the template
-  useEffect(() => {
-    const tplId = variable?.templateId ?? (client ? parseInt((client.templateId ?? '').replace('tpl_','')) : null)
-    if (!tplId) {
-      // Load all groups
-      api.get('/admin/groups')
-        .then(g => setGroups(g))
-        .catch(() => {})
-    } else {
-      api.get(`/admin/templates/${tplId}/groups`).catch(() => api.get('/admin/groups'))
-        .then(g => setGroups(Array.isArray(g) ? g : []))
-        .catch(() => {})
-    }
-  }, [])
-
-  const addAlt    = () => setAltList(p => [...p, { trigger:'', formula:'', _key: Date.now() }])
-  const removeAlt = k  => setAltList(p => p.filter(a => a._key !== k))
-  const updateAlt = (k,f,v) => setAltList(p => p.map(a => a._key===k ? {...a,[f]:v} : a))
-
-  const validate = () => {
-    const e = {}
-    if (!name.trim())  e.name  = 'Obrigatório'
-    if (!code.trim())  e.code  = 'Obrigatório'
-    if (!isInput && !formula.trim() && altList.length === 0) e.formula = 'Obrigatório para variáveis calculadas'
-    altList.forEach((a,i) => {
-      if (!a.trigger.trim()) e[`at${i}`] = 'Obrigatório'
-      if (!a.formula.trim()) e[`af${i}`] = 'Obrigatório'
-    })
-    setErrors(e)
-    return Object.keys(e).length === 0
-  }
-
-  const handleSave = () => {
-    if (!validate()) return
-    const saved = {
-      id:           code.trim(),
-      name:         name.trim(),
-      scope,
-      isInput,
-      formula:      isInput ? null : (formula.trim() || null),
-      groupId:      groupId ? parseInt(groupId) : null,
-      alternatives: isInput ? [] : altList.map(a => ({ trigger: a.trigger.trim(), formula: a.formula.trim() })),
-      _apiId:       variable?._apiId ?? null,
-      templateId:   variable?.templateId ?? null,
-    }
-    onSave(saved)
-  }
-
-  const inp = (val, onChange, placeholder, ek, cls='') => (
-    <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-      className={`border rounded-xl px-3 py-2 text-sm outline-none focus:border-sky-400 bg-white transition-colors
-        ${errors[ek]?'border-red-300 bg-red-50':'border-gray-200'} ${cls}`}/>
-  )
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[55] p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col border border-gray-100">
-
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-violet-600 rounded-lg flex items-center justify-center text-white text-xs">x</div>
-            <h2 className="font-bold text-gray-800">{isNew ? 'Nova Variável' : 'Editar Variável'}</h2>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-
-          {/* Name + Code */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome <span className="text-red-400">*</span></label>
-              {inp(name, setName, 'ex: Receita', 'name', 'w-full')}
-              {errors.name && <p className="text-red-500 text-xs mt-1">{errors.name}</p>}
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Código <span className="text-red-400">*</span></label>
-              {inp(code, setCode, 'ex: v_rec', 'code', 'w-full font-mono')}
-              {errors.code && <p className="text-red-500 text-xs mt-1">{errors.code}</p>}
-            </div>
-          </div>
-
-          {/* Scope + Input */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Âmbito</label>
-              <div className="relative">
-                <select value={scope} onChange={e=>setScope(e.target.value)}
-                  className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none">
-                  {SCOPES.map(s => <option key={s} value={s}>{s === 'lob' ? 'LOB' : s === 'language' ? 'Language' : 'Project'}</option>)}
-                </select>
-                <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
-                </svg>
-              </div>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Grupo de variáveis</label>
-              <div className="relative">
-                <select value={groupId ?? ''} onChange={e=>setGroupId(e.target.value || null)}
-                  className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none">
-                  <option value="">— sem grupo —</option>
-                  {groups.map(g => <option key={g.groupId} value={g.groupId}>{g.name}</option>)}
-                </select>
-                <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
-                </svg>
-              </div>
-            </div>
-          </div>
-
-          {/* Input toggle */}
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={isInput} onChange={e=>setIsInput(e.target.checked)}
-              className="w-4 h-4 accent-sky-600"/>
-            <span className="text-sm text-gray-700">Variável de input (valor introduzido pelo utilizador)</span>
-          </label>
-
-          {/* Formula */}
-          {!isInput && (
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">
-                Fórmula principal {altList.length === 0 && <span className="text-red-400">*</span>}
-              </label>
-              {inp(formula, setFormula, 'ex: v_rec - v_cus', 'formula', 'w-full font-mono')}
-              {errors.formula && <p className="text-red-500 text-xs mt-1">{errors.formula}</p>}
-            </div>
-          )}
-
-          {/* Alternatives */}
-          {!isInput && (
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Fórmulas alternativas</label>
-                <button onClick={addAlt} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Adicionar</button>
-              </div>
-              {altList.map((a, i) => (
-                <div key={a._key} className="grid grid-cols-[1fr_2fr_auto] gap-2 mb-2 items-start">
-                  <div>
-                    {inp(a.trigger, v=>updateAlt(a._key,'trigger',v), 'trigger (código)', `at${i}`, 'w-full font-mono')}
-                    {errors[`at${i}`] && <p className="text-red-500 text-xs mt-0.5">{errors[`at${i}`]}</p>}
-                  </div>
-                  <div>
-                    {inp(a.formula, v=>updateAlt(a._key,'formula',v), 'fórmula', `af${i}`, 'w-full font-mono')}
-                    {errors[`af${i}`] && <p className="text-red-500 text-xs mt-0.5">{errors[`af${i}`]}</p>}
-                  </div>
-                  <button onClick={()=>removeAlt(a._key)}
-                    className="text-red-400 hover:text-red-600 text-lg leading-none mt-1.5">×</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
-          <div>
-            {!isNew && onDelete && (
-              <button onClick={onDelete}
-                className="px-4 py-2 text-sm text-red-500 hover:text-red-700 font-medium">
-                Eliminar variável
-              </button>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
-            <button onClick={handleSave}
-              className="px-5 py-2 bg-violet-600 text-white text-sm rounded-xl hover:bg-violet-700 transition-colors font-semibold">
-              {isNew ? 'Criar variável' : 'Guardar'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-
-/* ── VersionMultiSelect ─────────────────────────────────────── */
-/* ── DictModal ──────────────────────────────────────────────── */
-function DictModal({ onClose, onLaunch }) {
-  const [sel, setSel] = useState("t01")
-  const d    = DICT[sel]
-  const test = TESTS.find(t => t.id === sel)
-  const rowCls = { i: "bg-white", c: "bg-gray-50 text-gray-400", x: "bg-orange-50" }
-  const rowDot = {
-    i: <span className="w-2 h-2 rounded-full bg-green-400 inline-block"/>,
-    c: null,
-    x: <span className="w-2 h-2 rounded-full bg-orange-400 inline-block"/>
-  }
-
-  if (!d) return null
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col border border-gray-100">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center">
-              <span className="text-white text-xs">📖</span>
-            </div>
-            <h2 className="font-bold text-gray-800 text-base">Guia de Testes</h2>
-            <span className="text-xs text-gray-400">— descrição detalhada e exemplos numéricos</span>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl transition-colors">×</button>
-        </div>
-
-        <div className="flex flex-1 overflow-hidden">
-          <div className="w-56 border-r border-gray-100 overflow-y-auto shrink-0 py-2">
-            {TESTS.map(t => (
-              <button key={t.id} onClick={() => setSel(t.id)}
-                className={`w-full text-left px-4 py-2.5 transition-colors border-l-2
-                  ${sel === t.id ? "border-sky-400 bg-sky-50 text-sky-700 font-semibold" : "border-transparent text-gray-500 hover:bg-gray-50 hover:text-gray-700"}`}>
-                <span className="text-xs font-mono block">{t.id.toUpperCase()}</span>
-                <span className="text-xs leading-tight">{t.label.split(" · ")[1]}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-6 space-y-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs font-mono font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200">{sel.toUpperCase()}</span>
-                </div>
-                <h3 className="text-lg font-bold text-gray-900">{test?.label.split(" · ")[1]}</h3>
-              </div>
-              <button onClick={() => onLaunch(sel)}
-                className="px-4 py-2 bg-green-600 text-white text-sm rounded-xl hover:bg-green-700 transition-colors font-semibold shrink-0 flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-green-300 animate-pulse"/>
-                Lançar teste ↗
-              </button>
-            </div>
-
-            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">O que testa</p>
-              <p className="text-sm text-gray-700 leading-relaxed">{d.what}</p>
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Fórmulas envolvidas</p>
-              <div className="space-y-1.5">
-                {d.formulas.map((f, i) => (
-                  <div key={i} className="bg-gray-900 text-emerald-400 font-mono text-sm px-4 py-2 rounded-lg">{f}</div>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Como executar</p>
-              <ol className="space-y-1.5">
-                {d.steps.map((s, i) => (
-                  <li key={i} className="flex gap-3 text-sm text-gray-700">
-                    <span className="w-5 h-5 rounded-full bg-sky-100 text-sky-700 font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">{i+1}</span>
-                    <span className="leading-relaxed">{s}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Exemplo numérico</p>
-                <span className="text-xs text-gray-400">— {d.ctx}</span>
-              </div>
-              <div className="rounded-xl overflow-hidden border border-gray-200">
-                <table className="w-full text-sm border-collapse">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="text-left px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Variável</th>
-                      <th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Antes</th>
-                      <th className="text-right px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide w-28">Depois</th>
-                      <th className="px-3 py-2 w-8"/>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {d.rows.map((r, i) => (
-                      <tr key={i} className={`border-b border-gray-100 last:border-0 ${rowCls[r.t]}`}>
-                        <td className={`px-4 py-2 font-mono text-xs ${r.t==="c"?"text-gray-400":"text-gray-700"}`}>{r.l}</td>
-                        <td className={`px-4 py-2 text-right font-mono text-sm ${r.t==="c"?"text-gray-400":"text-gray-600"}`}>{r.b}</td>
-                        <td className={`px-4 py-2 text-right font-mono text-sm font-semibold ${r.t==="x"?"text-orange-700":r.t==="i"?"text-green-700":"text-gray-400"}`}>
-                          {r.t!=="c"&&r.b!==r.a ? r.a : <span className="font-normal text-gray-400">{r.a}</span>}
-                        </td>
-                        <td className="px-3 py-2 text-center">{rowDot[r.t]}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 flex items-center gap-4 text-xs text-gray-400">
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-400 inline-block"/>Input a editar</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400 inline-block"/>Calculado que muda</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-gray-300 inline-block"/>Inalterado</span>
-                </div>
-              </div>
-            </div>
-
-            {d.note && (
-              <div className="flex gap-3 bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
-                <span className="text-amber-500 shrink-0 mt-0.5">💡</span>
-                <p className="text-sm text-amber-800 leading-relaxed">{d.note}</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-
-function VersionMultiSelect({ versions, selectedIds, onToggle, onClear }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef(null)
-
-  useEffect(() => {
-    if (!open) return
-    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
-    document.addEventListener("mousedown", h)
-    return () => document.removeEventListener("mousedown", h)
-  }, [open])
-
-  const label = selectedIds.length === 0
-    ? "Selecciona versões…"
-    : selectedIds.length === 1
-      ? (versions.find(v => v.id === selectedIds[0])?.name ?? "1 versão")
-      : `${versions.find(v => v.id === selectedIds[0])?.name ?? ""} + ${selectedIds.length - 1}`
-
-  return (
-    <div ref={ref} className="relative">
-      <button onClick={() => setOpen(p => !p)}
-        className={`flex items-center gap-2 pl-3 pr-2.5 py-1.5 text-sm border rounded-xl bg-white transition-all min-w-52
-          ${open ? "border-indigo-400 ring-2 ring-indigo-100" : "border-indigo-200 hover:border-indigo-300"}`}>
-        <div className="flex items-center gap-0.5 shrink-0">
-          {selectedIds.length === 0 && <span className="w-2 h-2 rounded-full bg-gray-300"/>}
-          {selectedIds.slice(0, 5).map(id => {
-            const ver = versions.find(v => v.id === id)
-            const col = verColor(ver?.colorIdx ?? versions.findIndex(v => v.id === id))
-            return <span key={id} className={`w-2 h-2 rounded-full ${col.dot}`}/>
-          })}
-        </div>
-        <span className={`flex-1 text-left text-sm truncate ${selectedIds.length === 0 ? "text-gray-400" : "text-gray-700 font-medium"}`}>
-          {label}
-        </span>
-        <svg className={`w-3.5 h-3.5 text-indigo-400 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
-          viewBox="0 0 20 20" fill="currentColor">
-          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
-        </svg>
-      </button>
-
-      {open && (
-        <div className="absolute top-full mt-1.5 left-0 bg-white border border-gray-200 rounded-xl shadow-xl z-30 min-w-52 py-1 overflow-hidden">
-          {versions.map((ver, idx) => {
-            const checked = selectedIds.includes(ver.id)
-            const pos     = selectedIds.indexOf(ver.id)
-            const col     = verColor(ver.colorIdx ?? idx)
-            return (
-              <label key={ver.id}
-                className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors select-none
-                  ${checked ? "bg-indigo-50" : "hover:bg-gray-50"}`}>
-                <input type="checkbox" checked={checked} onChange={() => onToggle(ver.id)}
-                  className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer"/>
-                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`}/>
-                <span className={`text-sm flex-1 ${checked ? "font-semibold text-indigo-700" : "text-gray-700"}`}>
-                  {ver.name}
-                </span>
-                {checked && (
-                  <span className="text-xs text-indigo-400 font-bold shrink-0">#{pos + 1}</span>
-                )}
-              </label>
-            )
-          })}
-          {selectedIds.length > 0 && (
-            <div className="border-t border-gray-100 mt-1 pt-1 px-4 py-1.5">
-              <button onClick={() => { onClear(); setOpen(false) }}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors">
-                Limpar selecção
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/* ── VersionTab ─────────────────────────────────────────────── */
-function VersionTab({ ver, colorIdx, isActive, onSelect, onClone, onRename, onDelete, canDelete }) {
-  const [renaming, setRenaming] = useState(false)
-  const [draft,    setDraft]    = useState(ver.name)
-  const col = verColor(colorIdx)
-
-  if (renaming) return (
-    <div className="flex items-center px-2 py-2.5 border-b-2 border-transparent">
-      <input autoFocus value={draft}
-        className="border border-indigo-300 rounded px-2 py-0.5 text-sm w-28 outline-none focus:border-indigo-400 bg-white"
-        onChange={e => setDraft(e.target.value)}
-        onBlur={() => { onRename(draft.trim() || ver.name); setRenaming(false) }}
-        onKeyDown={e => {
-          if (e.key === "Enter")  { onRename(draft.trim() || ver.name); setRenaming(false) }
-          if (e.key === "Escape") { setDraft(ver.name); setRenaming(false) }
-        }}
-      />
-    </div>
-  )
-
-  const lockBadge = ver.isLocked
-    ? <span className="text-[10px] text-amber-500 ml-0.5">🔒</span>
-    : null
-
-  return (
-    <div onClick={() => onSelect(ver.id)}
-      className={`relative flex items-center gap-2 px-4 py-2.5 border-b-2 cursor-pointer transition-all whitespace-nowrap group select-none
-        ${isActive ? `${col.active} font-semibold` : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-200"}`}>
-      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`}/>
-      <span className="text-sm">{ver.name}</span>
-      {lockBadge}
-      {isActive && (
-        <div className="flex items-center gap-0.5 ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button title="Renomear" onClick={e => { e.stopPropagation(); setRenaming(true) }}
-            className="text-gray-400 hover:text-gray-700 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-white/60 transition-colors">✎</button>
-          <button title="Clonar" onClick={e => { e.stopPropagation(); onClone() }}
-            className="text-gray-400 hover:text-gray-700 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-white/60 transition-colors">⎘</button>
-          {canDelete && (
-            <button title="Eliminar" onClick={e => { e.stopPropagation(); onDelete() }}
-              className="text-red-400 hover:text-red-600 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-red-50 transition-colors">✕</button>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-
-function HamburgerMenu({ open, onClose, onTemplate, onProject, onDict, onAdmin }) {
-  if (!open) return null
-  return (
-    <>
-      <div className="fixed inset-0 bg-black/30 z-40" onClick={onClose}/>
-      <div className="fixed left-0 top-0 h-full w-64 bg-white shadow-2xl z-50 flex flex-col">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center">
-              <span className="text-white text-xs font-bold">∑</span>
-            </div>
-            <span className="font-bold text-gray-900 text-sm">Motor de Cálculo</span>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">×</button>
-        </div>
-        <nav className="flex-1 p-3 flex flex-col gap-0.5 overflow-y-auto">
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 py-2">Configuração</p>
-          <button onClick={()=>{onTemplate();onClose()}}
-            className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
-            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">∑</span>
-            Templates
-          </button>
-          <button onClick={()=>{onProject();onClose()}}
-            className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
-            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">🏢</span>
-            Projectos
-          </button>
-          <button onClick={()=>{onAdmin();onClose()}}
-            className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
-            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">⚙️</span>
-            Tipos de Versão e Grupos
-          </button>
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 py-2 mt-2">Ferramentas</p>
-          <button onClick={()=>{onDict();onClose()}}
-            className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
-            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">📖</span>
-            Dicionário de Testes
-          </button>
-        </nav>
-        <div className="p-4 border-t border-gray-100">
-          <p className="text-xs text-gray-400 text-center">Motor de Cálculo v1.0</p>
-        </div>
-      </div>
-    </>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   GRID FILTERS
-   ═══════════════════════════════════════════════════════════════ */
-function GridFilters({
-  project,
-  filterScope, setFilterScope,
-  filterType,  setFilterType,
-  filterLang,  setFilterLang,
-  filterLob,   setFilterLob,
-  filterVar,   setFilterVar,
-  filterGroup, setFilterGroup,
-  availableGroups
-}) {
-  const langs = project.languages ?? []
-  const selectedLang = langs.find(l => l.code === filterLang)
-  const lobs = filterLang && selectedLang ? selectedLang.lobs : langs.flatMap(l => l.lobs)
-
-  // Quando muda o âmbito, limpa filtros de língua/lob que não fazem sentido
-  const handleScopeChange = val => {
-    setFilterScope(val)
-    if (val === 'project') { setFilterLang(''); setFilterLob('') }
-    if (val === 'language') { setFilterLob('') }
-  }
-
-  const hasFilters = filterScope || filterType || filterLang || filterLob || filterVar || filterGroup
-  const clearAll   = () => { setFilterScope(''); setFilterType(''); setFilterLang(''); setFilterLob(''); setFilterVar(''); if(setFilterGroup) setFilterGroup('') }
-
-  const scopeLabel = { template: 'Projecto', language: 'Língua', lob: 'LOB' }
-
-  return (
-    <div className="bg-gray-50 border-b border-gray-200 px-4 py-2 flex items-center gap-2 shrink-0 flex-wrap">
-      <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider shrink-0">Filtros</span>
-
-      {/* Âmbito */}
-      <select value={filterScope}
-        onChange={e => handleScopeChange(e.target.value)}
-        className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
-          ${filterScope ? 'border-violet-300 text-violet-700 bg-violet-50' : 'border-gray-200 text-gray-700'}`}>
-        <option value="">Todos os âmbitos</option>
-        <option value="project">Apenas Projecto</option>
-        <option value="language">Apenas Língua</option>
-        <option value="lob">Apenas LOB</option>
-      </select>
-
-      {/* Tipo: input vs calculada */}
-      <select value={filterType}
-        onChange={e => setFilterType(e.target.value)}
-        className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
-          ${filterType === 'input'      ? 'border-cyan-300 text-cyan-700 bg-cyan-50'
-          : filterType === 'calculated' ? 'border-gray-300 text-gray-600'
-          : 'border-gray-200 text-gray-700'}`}>
-        <option value="">Todos os tipos</option>
-        <option value="input">✎ Apenas inputs</option>
-        <option value="calculated">∑ Apenas calculadas</option>
-      </select>
-
-      {/* Língua — visível quando scope não é template */}
-      {filterScope !== 'template' && (
-        <select value={filterLang}
-          onChange={e => { setFilterLang(e.target.value); setFilterLob('') }}
-          className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
-            ${filterLang ? 'border-sky-300 text-sky-700 bg-sky-50' : 'border-gray-200 text-gray-700'}`}>
-          <option value="">Todas as línguas</option>
-          {langs.map(l => <option key={l.id} value={l.code}>{l.code} — {l.name}</option>)}
-        </select>
-      )}
-
-      {/* LOB — visível quando scope é lob ou vazio */}
-      {(filterScope === '' || filterScope === 'lob') && (
-        <select value={filterLob}
-          onChange={e => setFilterLob(e.target.value)}
-          className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
-            ${filterLob ? 'border-indigo-300 text-indigo-700 bg-indigo-50' : 'border-gray-200 text-gray-700'}`}>
-          <option value="">Todos os LOBs</option>
-          {lobs.map(b => <option key={b.id} value={b.code}>{b.code} — {b.name}</option>)}
-        </select>
-      )}
-
-      {/* Variável */}
-      <input value={filterVar}
-        onChange={e => setFilterVar(e.target.value)}
-        placeholder="Filtrar variável..."
-        className={`text-xs px-3 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 w-36 transition-colors
-          ${filterVar ? 'border-amber-300 text-amber-700 bg-amber-50' : 'border-gray-200 text-gray-700'}`}/>
-
-      {/* Grupo */}
-      {availableGroups?.length > 0 && (
-        <select value={filterGroup||''} onChange={e=>setFilterGroup&&setFilterGroup(e.target.value)}
-          className={`text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
-            ${filterGroup ? 'border-teal-300 text-teal-700 bg-teal-50' : 'border-gray-200 text-gray-700'}`}>
-          <option value="">Todos os grupos</option>
-          {availableGroups.map(g=>(
-            <option key={g.id} value={g.id}>{g.name}</option>
-          ))}
-        </select>
-      )}
-
-      {/* Tags activas */}
-      {filterType === 'input'      && <span className="text-xs px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded-full font-medium">✎ Inputs</span>}
-      {filterType === 'calculated' && <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full font-medium">∑ Calculadas</span>}
-      {filterScope && <span className="text-xs px-2 py-0.5 bg-violet-100 text-violet-700 rounded-full font-medium">{scopeLabel[filterScope]}</span>}
-      {filterLang  && <span className="text-xs px-2 py-0.5 bg-sky-100 text-sky-700 rounded-full font-medium">{filterLang}</span>}
-      {filterLob   && <span className="text-xs px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full font-medium">{filterLob}</span>}
-      {filterVar   && <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full font-medium">"{filterVar}"</span>}
-      {filterGroup && availableGroups && <span className="text-xs px-2 py-0.5 bg-teal-100 text-teal-700 rounded-full font-medium">{availableGroups.find(g=>g.id===filterGroup)?.name ?? filterGroup}</span>}
-
-      {hasFilters && (
-        <button onClick={clearAll}
-          className="text-xs text-gray-400 hover:text-red-500 font-medium transition-colors ml-1">
-          × Limpar
-        </button>
-      )}
-    </div>
-  )
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   PERIOD RANGE HELPERS
-   ═══════════════════════════════════════════════════════════════ */
-
-// Gera array de YYYYMM entre start e end (inclusive)
 const generatePeriods = (start, end) => {
   const result = []
-  let cur = start
-  while (cur <= end && result.length < 120) {  // max 10 anos
-    result.push(cur)
-    const y = Math.floor(cur / 100), m = cur % 100
-    cur = m === 12 ? (y + 1) * 100 + 1 : y * 100 + (m + 1)
+  let [y, m] = [Math.floor(start / 100), start % 100]
+  const [ey, em] = [Math.floor(end / 100), end % 100]
+  while (y < ey || (y === ey && m <= em)) {
+    result.push(y * 100 + m)
+    m++; if (m > 12) { m = 1; y++ }
   }
   return result
 }
-
-const MONTHS_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
 
 // Converte YYYYMM → { year, month }
 const parsePeriod = p => ({ year: Math.floor(p / 100), month: p % 100 })
@@ -2920,6 +1458,640 @@ function AdminPanel({ onClose }) {
 }
 
 
+/* ═══════════════════════════════════════════════════════════════
+   VAR MODAL
+   ═══════════════════════════════════════════════════════════════ */
+function VarModal({ variable, variables, client, onSave, onClose, onDelete }) {
+  const isNew  = !variable
+  const SCOPES = ['lob','language','project']
+  const [name,     setName]    = useState(variable?.name      ?? '')
+  const [code,     setCode]    = useState(variable?.id        ?? '')
+  const [scope,    setScope]   = useState(variable?.scope     ?? 'lob')
+  const [isInput,  setIsInput] = useState(variable?.isInput   ?? false)
+  const [formula,  setFormula] = useState(variable?.formula   ?? '')
+  const [groupId,  setGroupId] = useState(variable?.groupId   ?? null)
+  const [altList,  setAltList] = useState(() =>
+    (variable?.alternatives ?? []).map?.((a,i) => typeof a === 'object'
+      ? { ...a, _key: i } : { trigger:'', formula:'', _key: i }) ?? []
+  )
+  const [groups,   setGroups]  = useState([])
+  const [errors,   setErrors]  = useState({})
+
+  useEffect(() => {
+    const tplId = variable?.templateId ?? (client ? parseInt((client.templateId ?? '').replace('tpl_','')) : null)
+    const endpoint = tplId ? `/admin/templates/${tplId}/groups` : '/admin/groups'
+    api.get(endpoint).catch(() => api.get('/admin/groups'))
+      .then(g => setGroups(Array.isArray(g) ? g : []))
+      .catch(() => {})
+  }, [])
+
+  const addAlt    = () => setAltList(p => [...p, { trigger:'', formula:'', _key: Date.now() }])
+  const removeAlt = k  => setAltList(p => p.filter(a => a._key !== k))
+  const updateAlt = (k,f,v) => setAltList(p => p.map(a => a._key===k ? {...a,[f]:v} : a))
+
+  const validate = () => {
+    const e = {}
+    if (!name.trim()) e.name = 'Obrigatório'
+    if (!code.trim()) e.code = 'Obrigatório'
+    if (!isInput && !formula.trim() && altList.length === 0) e.formula = 'Obrigatório para variáveis calculadas'
+    altList.forEach((a,i) => {
+      if (!a.trigger.trim()) e[`at${i}`] = 'Obrigatório'
+      if (!a.formula.trim()) e[`af${i}`] = 'Obrigatório'
+    })
+    setErrors(e); return Object.keys(e).length === 0
+  }
+
+  const handleSave = () => {
+    if (!validate()) return
+    onSave({
+      id: code.trim(), name: name.trim(), scope, isInput,
+      formula: isInput ? null : (formula.trim() || null),
+      groupId: groupId ? parseInt(groupId) : null,
+      alternatives: isInput ? [] : altList.map(a => ({ trigger: a.trigger.trim(), formula: a.formula.trim() })),
+      _apiId: variable?._apiId ?? null, templateId: variable?.templateId ?? null,
+    })
+  }
+
+  const inp = (val, onChange, placeholder, ek, cls='') => (
+    <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      className={`border rounded-xl px-3 py-2 text-sm outline-none focus:border-sky-400 bg-white transition-colors
+        ${errors[ek]?'border-red-300 bg-red-50':'border-gray-200'} ${cls}`}/>
+  )
+
+  const sel = (val, onChange, children) => (
+    <div className="relative">
+      <select value={val ?? ''} onChange={e=>onChange(e.target.value)}
+        className="w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none">
+        {children}
+      </select>
+      <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
+        <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+      </svg>
+    </div>
+  )
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[55] p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <h2 className="font-bold text-gray-800">{isNew ? 'Nova Variável' : 'Editar Variável'}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome <span className="text-red-400">*</span></label>
+              {inp(name, setName, 'ex: Receita', 'name', 'w-full')}
+              {errors.name && <p className="text-red-500 text-xs mt-1">{errors.name}</p>}
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Código <span className="text-red-400">*</span></label>
+              {inp(code, setCode, 'ex: v_rec', 'code', 'w-full font-mono')}
+              {errors.code && <p className="text-red-500 text-xs mt-1">{errors.code}</p>}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Âmbito</label>
+              {sel(scope, setScope, SCOPES.map(s => <option key={s} value={s}>{s==='lob'?'LOB':s==='language'?'Language':'Project'}</option>))}
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Grupo</label>
+              {sel(groupId, setGroupId, [
+                <option key="" value="">— sem grupo —</option>,
+                ...groups.map(g => <option key={g.groupId} value={g.groupId}>{g.name}</option>)
+              ])}
+            </div>
+          </div>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={isInput} onChange={e=>setIsInput(e.target.checked)} className="w-4 h-4 accent-sky-600"/>
+            <span className="text-sm text-gray-700">Variável de input</span>
+          </label>
+          {!isInput && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Fórmula principal {altList.length===0&&<span className="text-red-400">*</span>}</label>
+              {inp(formula, setFormula, 'ex: v_rec - v_cus', 'formula', 'w-full font-mono')}
+              {errors.formula && <p className="text-red-500 text-xs mt-1">{errors.formula}</p>}
+            </div>
+          )}
+          {!isInput && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Fórmulas alternativas</label>
+                <button onClick={addAlt} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Adicionar</button>
+              </div>
+              {altList.map((a,i) => (
+                <div key={a._key} className="grid grid-cols-[1fr_2fr_auto] gap-2 mb-2 items-start">
+                  <div>{inp(a.trigger, v=>updateAlt(a._key,'trigger',v), 'trigger', `at${i}`, 'w-full font-mono')}{errors[`at${i}`]&&<p className="text-red-500 text-xs mt-0.5">{errors[`at${i}`]}</p>}</div>
+                  <div>{inp(a.formula, v=>updateAlt(a._key,'formula',v), 'fórmula', `af${i}`, 'w-full font-mono')}{errors[`af${i}`]&&<p className="text-red-500 text-xs mt-0.5">{errors[`af${i}`]}</p>}</div>
+                  <button onClick={()=>removeAlt(a._key)} className="text-red-400 hover:text-red-600 text-lg leading-none mt-1.5">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
+          <div>{!isNew && onDelete && <button onClick={onDelete} className="px-4 py-2 text-sm text-red-500 hover:text-red-700 font-medium">Eliminar variável</button>}</div>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+            <button onClick={handleSave} className="px-5 py-2 bg-violet-600 text-white text-sm rounded-xl hover:bg-violet-700 transition-colors font-semibold">
+              {isNew ? 'Criar variável' : 'Guardar'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VERSION TAB + MULTI SELECT
+   ═══════════════════════════════════════════════════════════════ */
+function VersionMultiSelect({ versions, selectedIds, onToggle, onClear }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener("mousedown", h)
+    return () => document.removeEventListener("mousedown", h)
+  }, [open])
+  const label = selectedIds.length === 0 ? "Selecciona versões…"
+    : selectedIds.length === 1 ? (versions.find(v=>v.id===selectedIds[0])?.name ?? "1 versão")
+    : `${versions.find(v=>v.id===selectedIds[0])?.name ?? ""} +${selectedIds.length-1}`
+  return (
+    <div ref={ref} className="relative">
+      <button onClick={()=>setOpen(p=>!p)}
+        className={`flex items-center gap-2 pl-3 pr-2.5 py-1.5 text-sm border rounded-xl bg-white transition-all min-w-52
+          ${open?"border-indigo-400 ring-2 ring-indigo-100":"border-indigo-200 hover:border-indigo-300"}`}>
+        <div className="flex items-center gap-0.5 shrink-0">
+          {selectedIds.length===0&&<span className="w-2 h-2 rounded-full bg-gray-300"/>}
+          {selectedIds.slice(0,5).map(id=>{const col=verColor(versions.findIndex(v=>v.id===id));return <span key={id} className={`w-2 h-2 rounded-full ${col.dot}`}/>})}
+        </div>
+        <span className={`flex-1 text-left text-sm truncate ${selectedIds.length===0?"text-gray-400":"text-gray-700 font-medium"}`}>{label}</span>
+        <svg className={`w-3.5 h-3.5 text-indigo-400 shrink-0 transition-transform ${open?"rotate-180":""}`} viewBox="0 0 20 20" fill="currentColor">
+          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1.5 left-0 bg-white border border-gray-200 rounded-xl shadow-xl z-30 min-w-52 py-1 overflow-hidden">
+          {versions.map((ver,idx)=>{
+            const checked=selectedIds.includes(ver.id);const col=verColor(ver.colorIdx??idx)
+            return (
+              <label key={ver.id} className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors select-none ${checked?"bg-indigo-50":"hover:bg-gray-50"}`}>
+                <input type="checkbox" checked={checked} onChange={()=>onToggle(ver.id)} className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer"/>
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`}/>
+                <span className={`text-sm flex-1 ${checked?"font-semibold text-indigo-700":"text-gray-700"}`}>{ver.name}</span>
+              </label>
+            )
+          })}
+          {selectedIds.length>0&&(
+            <div className="border-t border-gray-100 mt-1 pt-1 px-4 py-1.5">
+              <button onClick={()=>{onClear();setOpen(false)}} className="text-xs text-gray-400 hover:text-gray-600 transition-colors">Limpar selecção</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function VersionTab({ ver, colorIdx, isActive, onSelect, onClone, onRename, onDelete, canDelete }) {
+  const [renaming, setRenaming] = useState(false)
+  const [draft,    setDraft]    = useState(ver.name)
+  const col = verColor(colorIdx)
+  if (renaming) return (
+    <div className="flex items-center px-2 py-2.5 border-b-2 border-transparent">
+      <input autoFocus value={draft}
+        className="border border-indigo-300 rounded px-2 py-0.5 text-sm w-28 outline-none focus:border-indigo-400 bg-white"
+        onChange={e=>setDraft(e.target.value)}
+        onBlur={()=>{onRename(draft.trim()||ver.name);setRenaming(false)}}
+        onKeyDown={e=>{if(e.key==="Enter"){onRename(draft.trim()||ver.name);setRenaming(false)}if(e.key==="Escape"){setDraft(ver.name);setRenaming(false)}}}/>
+    </div>
+  )
+  return (
+    <div onClick={()=>onSelect(ver.id)}
+      className={`relative flex items-center gap-2 px-4 py-2.5 border-b-2 cursor-pointer transition-all whitespace-nowrap group select-none
+        ${isActive?`${col.active} font-semibold`:"border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-200"}`}>
+      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${col.dot}`}/>
+      <span className="text-sm">{ver.name}</span>
+      {ver.isLocked&&<span className="text-[10px] text-amber-500 ml-0.5">🔒</span>}
+      {isActive&&(
+        <div className="flex items-center gap-0.5 ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button title="Renomear" onClick={e=>{e.stopPropagation();setRenaming(true)}} className="text-gray-400 hover:text-gray-700 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-white/60">✎</button>
+          <button title="Clonar" onClick={e=>{e.stopPropagation();onClone()}} className="text-gray-400 hover:text-gray-700 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-white/60">⎘</button>
+          {canDelete&&<button title="Eliminar" onClick={e=>{e.stopPropagation();onDelete()}} className="text-red-400 hover:text-red-600 text-xs w-5 h-5 flex items-center justify-center rounded hover:bg-red-50">✕</button>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PROJECT LIST PANEL + PROJECT MODAL
+   ═══════════════════════════════════════════════════════════════ */
+function ProjectListPanel({ allProjects, templates, onEdit, onCreate, onDelete, onClose }) {
+  const [confirmDelete, setConfirmDelete] = useState(null)
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50" onClick={onClose}/>
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
+            <h2 className="font-bold text-gray-800">Projectos</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onCreate} className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold transition-colors">+ Novo</button>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {allProjects.map(p=>{
+            const tpl=templates.find(t=>t.id===`tpl_${p.templateId}`)
+            return (
+              <div key={p.projectId} className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors">
+                <div className="flex-1 min-w-0">
+                  <span className="font-semibold text-sm text-gray-800 truncate block">{p.name}</span>
+                  <p className="text-xs text-gray-400 mt-0.5 truncate">Template: {tpl?.name??`#${p.templateId}`}</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button onClick={()=>onEdit(p.projectId)} className="text-xs px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-lg font-medium transition-colors">Editar</button>
+                  <button onClick={()=>setConfirmDelete(p)} className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium transition-colors">Eliminar</button>
+                </div>
+              </div>
+            )
+          })}
+          {allProjects.length===0&&<p className="text-sm text-gray-400 text-center py-8">Sem projectos criados.</p>}
+        </div>
+      </div>
+      {confirmDelete&&(
+        <>
+          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setConfirmDelete(null)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
+            <p className="font-semibold text-gray-800 mb-1">Eliminar projecto?</p>
+            <p className="text-sm text-gray-400 mb-1 truncate">{confirmDelete.name}</p>
+            <p className="text-xs text-red-400 mb-5">Todas as versões e células serão eliminadas.</p>
+            <div className="flex gap-3">
+              <button onClick={()=>setConfirmDelete(null)} className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">Cancelar</button>
+              <button onClick={()=>{onDelete(confirmDelete.projectId);setConfirmDelete(null)}} className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">Eliminar</button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+function ProjectModal({ project, templates: templatesProp, isNew, onSave, onClose }) {
+  const [name,       setName]       = useState(project?.name ?? '')
+  const [templateId, setTemplateId] = useState(project?.templateId ?? '')
+  const [langs,      setLangs]      = useState(() => (project?.languages??[]).map(l=>({...l,lobs:(l.lobs??[]).map(b=>({...b}))})))
+  const [expandedLangs, setExpandedLangs] = useState(new Set((project?.languages??[]).map(l=>l.id)))
+  const [errors,   setErrors]   = useState({})
+  const [templates, setTemplates] = useState(templatesProp ?? [])
+  const idCtr = useRef(1000)
+  const newId  = prefix => `${prefix}_${String(idCtr.current++).padStart(3,"0")}`
+
+  useEffect(() => {
+    if (!templatesProp?.length) {
+      api.get('/admin/templates')
+        .then(tpls=>setTemplates(tpls.map(t=>({id:`tpl_${t.templateId}`,name:t.name}))))
+        .catch(e=>console.error(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isNew && project?.id && (!project.languages || project.languages.length===0)) {
+      const rawId = parseInt((project.id??'').replace('c_',''))
+      if (!rawId) return
+      api.get(`/projects/${rawId}/structure`)
+        .then(data=>{
+          const ls=(data.languages??[]).map(l=>({
+            id:`l_${l.languageId}`,code:l.code,name:l.name,
+            lobs:(l.lobs??[]).map(b=>({id:`b_${b.lobId}`,code:b.code,name:b.name}))
+          }))
+          setLangs(ls);setExpandedLangs(new Set(ls.map(l=>l.id)))
+        }).catch(e=>console.error(e))
+    }
+  }, [project?.id])
+
+  const addLang    = () => { const id=newId("l");setLangs(p=>[...p,{id,code:"",name:"",lobs:[]}]);setExpandedLangs(p=>new Set([...p,id])) }
+  const removeLang = id => { setLangs(p=>p.filter(l=>l.id!==id));setExpandedLangs(p=>{const n=new Set(p);n.delete(id);return n}) }
+  const updateLang = (id,f,v) => setLangs(p=>p.map(l=>l.id===id?{...l,[f]:v}:l))
+  const toggleLang = id => setExpandedLangs(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n})
+  const addLob    = lid => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:[...l.lobs,{id:newId("b"),code:"",name:""}]}:l))
+  const removeLob = (lid,bid) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.filter(b=>b.id!==bid)}:l))
+  const updateLob = (lid,bid,f,v) => setLangs(p=>p.map(l=>l.id===lid?{...l,lobs:l.lobs.map(b=>b.id===bid?{...b,[f]:v}:b)}:l))
+
+  const validate = () => {
+    const e={}
+    if (!name.trim()) e.name="Obrigatório"
+    if (!templateId)  e.tpl="Selecciona um template"
+    setErrors(e);return Object.keys(e).length===0
+  }
+
+  const handleSave = () => { if (validate()) onSave({...(project??{}),name:name.trim(),templateId,languages:langs}) }
+
+  const inp=(val,onChange,placeholder,ek,cls="")=>(
+    <input value={val} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      className={`border rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-400 bg-white transition-colors ${errors[ek]?"border-red-300":"border-gray-200"} ${cls}`}/>
+  )
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            {!isNew&&<button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-sm flex items-center gap-1 hover:bg-gray-100 px-2 py-1 rounded-lg">← Lista</button>}
+            <div className="w-7 h-7 bg-sky-600 rounded-lg flex items-center justify-center text-white text-xs">🏢</div>
+            <h2 className="font-bold text-gray-800">{isNew?'Novo Projecto':'Configuração do Projecto'}</h2>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Projecto</label>
+              {inp(name,setName,"Acme Corp","name","w-full")}
+              {errors.name&&<p className="text-red-500 text-xs mt-1">{errors.name}</p>}
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Template associado</label>
+              <div className="relative">
+                <select value={templateId} onChange={e=>setTemplateId(e.target.value)}
+                  className={`w-full border rounded-lg pl-3 pr-8 py-2 text-sm outline-none focus:border-sky-400 bg-white appearance-none ${errors.tpl?"border-red-300":"border-gray-200"}`}>
+                  <option value="">— selecciona —</option>
+                  {templates.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
+              </div>
+              {errors.tpl&&<p className="text-red-500 text-xs mt-1">{errors.tpl}</p>}
+            </div>
+          </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Línguas & LOBs</label>
+              <button onClick={addLang} className="text-xs text-sky-600 hover:text-sky-800 font-semibold">+ Língua</button>
+            </div>
+            {langs.map((l,li)=>(
+              <div key={l.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border-b border-gray-100">
+                  <button onClick={()=>toggleLang(l.id)} className="text-gray-400 hover:text-gray-600 text-xs w-5">{expandedLangs.has(l.id)?'▾':'▸'}</button>
+                  {inp(l.code,v=>updateLang(l.id,'code',v),"Código",`lc${li}`,"w-20 font-mono")}
+                  {inp(l.name,v=>updateLang(l.id,'name',v),"Nome",`ln${li}`,"flex-1")}
+                  <button onClick={()=>removeLang(l.id)} className="text-red-400 hover:text-red-600 text-lg leading-none ml-1">×</button>
+                </div>
+                {expandedLangs.has(l.id)&&(
+                  <div className="p-3 space-y-2">
+                    {l.lobs.map((b,bi)=>(
+                      <div key={b.id} className="flex items-center gap-2 pl-6">
+                        <span className="text-gray-300 text-xs">└</span>
+                        {inp(b.code,v=>updateLob(l.id,b.id,'code',v),"Cód.",`bc${li}${bi}`,"w-20 font-mono")}
+                        {inp(b.name,v=>updateLob(l.id,b.id,'name',v),"Nome LOB",`bn${li}${bi}`,"flex-1")}
+                        <button onClick={()=>removeLob(l.id,b.id)} className="text-red-400 hover:text-red-600 text-lg leading-none">×</button>
+                      </div>
+                    ))}
+                    <button onClick={()=>addLob(l.id)} className="text-xs text-gray-400 hover:text-gray-600 pl-6 font-medium">+ LOB</button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {langs.length===0&&<p className="text-sm text-gray-400 text-center py-3">Sem línguas.</p>}
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-3 shrink-0">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+          <button onClick={handleSave} className="px-5 py-2 bg-sky-600 text-white text-sm rounded-xl hover:bg-sky-700 transition-colors font-semibold">
+            {isNew?'Criar Projecto':'Guardar Projecto'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TEMPLATE MODAL — autónomo, carrega dados da API
+   ═══════════════════════════════════════════════════════════════ */
+function TemplateModal({ initialTemplateId, onClose, onEditVar, onAddVar }) {
+  const [allTemplates, setAllTemplates] = useState([])
+  const [activeId,     setActiveId]     = useState(initialTemplateId ?? null)
+  const [vars,         setVars]         = useState([])
+  const [name,         setName]         = useState("")
+  const [desc,         setDesc]         = useState("")
+  const [loading,      setLoading]      = useState(true)
+  const [loadingVars,  setLoadingVars]  = useState(false)
+  const [saving,       setSaving]       = useState(false)
+  const [deleting,     setDeleting]     = useState(false)
+
+  useEffect(() => {
+    api.get('/admin/templates')
+      .then(tpls => {
+        setAllTemplates(tpls)
+        const first = initialTemplateId ? tpls.find(t=>t.templateId===initialTemplateId) : tpls[0]
+        if (first) { setActiveId(first.templateId); setName(first.name); setDesc(first.description??'') }
+      })
+      .catch(e=>console.error(e))
+      .finally(()=>setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!activeId) return
+    setLoadingVars(true)
+    api.get(`/templates/${activeId}/variables`)
+      .then(data=>{
+        setVars((data??[]).map(v=>({
+          id:v.code, name:v.name, scope:v.scopeCode, isInput:v.isInput,
+          formula:v.formulas?.find(f=>f.formulaType==="main")?.expression??null,
+          alternatives:(v.formulas??[]).filter(f=>f.formulaType==="alternative").length,
+          groupId:v.groupId??null, _apiId:v.variableId
+        })))
+      })
+      .catch(e=>console.error(e))
+      .finally(()=>setLoadingVars(false))
+  }, [activeId])
+
+  const switchTemplate = idStr => {
+    const id=parseInt(idStr); const tpl=allTemplates.find(t=>t.templateId===id)
+    if (!tpl) return
+    setActiveId(id); setName(tpl.name); setDesc(tpl.description??''); setVars([])
+  }
+
+  const handleSave = async () => {
+    if (!activeId || !name.trim()) return
+    setSaving(true)
+    try {
+      const updated = await api.put(`/admin/templates/${activeId}`, {code:"",name:name.trim(),description:desc})
+      setAllTemplates(prev=>prev.map(t=>t.templateId===activeId?{...t,name:updated.name,description:updated.description}:t))
+    } catch(e) { alert('Erro ao guardar: '+e.message) }
+    finally { setSaving(false) }
+  }
+
+  const handleNew = async () => {
+    try {
+      const created = await api.post('/admin/templates', {code:`tpl_${Date.now()}`,name:"Novo Template",description:""})
+      setAllTemplates(prev=>[...prev,created])
+      setActiveId(created.templateId); setName(created.name); setDesc(created.description??''); setVars([])
+    } catch(e) { alert('Erro ao criar: '+e.message) }
+  }
+
+  const handleDelete = async () => {
+    try {
+      await api.delete(`/admin/templates/${activeId}`)
+      const remaining=allTemplates.filter(t=>t.templateId!==activeId)
+      setAllTemplates(remaining)
+      if (remaining.length>0) { const n=remaining[0]; setActiveId(n.templateId); setName(n.name); setDesc(n.description??''); setVars([]) }
+      else onClose()
+    } catch(e) { alert('Erro ao eliminar: '+e.message) }
+    finally { setDeleting(false) }
+  }
+
+  const activeTemplate = allTemplates.find(t=>t.templateId===activeId)
+  const SC = { lob:{label:"LOB"}, language:{label:"Language"}, project:{label:"Project"} }
+  const scopeOrder = ["lob","language","project"]
+  const grouped = scopeOrder.map(s=>({scope:s, vars:vars.filter(v=>v.scope===s)}))
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] flex flex-col border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center text-white text-xs">∑</div>
+            <h2 className="font-bold text-gray-800">Definição do Template</h2>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-xl">×</button>
+        </div>
+        <div className="px-6 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 shrink-0">
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide shrink-0">Template</span>
+          <div className="relative flex-1">
+            <select value={activeId??''} onChange={e=>switchTemplate(e.target.value)} disabled={loading}
+              className="w-full pl-3 pr-8 py-1.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-sky-400 appearance-none disabled:opacity-50">
+              {allTemplates.map(t=><option key={t.templateId} value={t.templateId}>{t.name}</option>)}
+            </select>
+            <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
+          </div>
+          <button onClick={handleNew} className="text-xs px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-medium shrink-0 transition-colors">+ Novo</button>
+          {activeId&&<button onClick={()=>setDeleting(true)} className="text-xs px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium shrink-0 transition-colors">Eliminar</button>}
+        </div>
+        {loading ? <div className="flex-1 flex items-center justify-center text-sm text-gray-400">A carregar...</div>
+        : !activeId ? <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Sem templates.</div>
+        : (
+          <>
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Nome do Template</label>
+                  <input value={name} onChange={e=>setName(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400" placeholder="Template Standard"/>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Descrição</label>
+                  <input value={desc} onChange={e=>setDesc(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-400" placeholder="Descrição opcional"/>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                {grouped.filter(g=>g.vars.length>0).map(g=>(
+                  <span key={g.scope} className="text-xs bg-blue-50 text-blue-600 px-2.5 py-1 rounded-lg border border-blue-100 font-medium">{SC[g.scope]?.label??g.scope}</span>
+                ))}
+                <span className="text-xs text-gray-400">{loadingVars?'A carregar...':vars.length+' variáveis'}</span>
+              </div>
+              {loadingVars ? <div className="text-sm text-gray-400 text-center py-4">A carregar...</div> : (
+                <div className="border border-gray-100 rounded-xl overflow-hidden">
+                  {grouped.filter(g=>g.vars.length>0).map(({scope,vars:sv})=>(
+                    <div key={scope}>
+                      <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-100">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{SC[scope]?.label??scope}</span>
+                        <span className="text-xs text-gray-300">{sv.length}</span>
+                      </div>
+                      {sv.map(v=>(
+                        <div key={v.id} className="flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 group">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-sm text-gray-800">{v.name}</span>
+                              <span className="text-xs font-mono text-gray-400">{v.id}</span>
+                              {v.isInput?<span className="text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-500">input</span>
+                              :v.alternatives>0?<span className="text-xs bg-violet-50 px-1.5 py-0.5 rounded border border-violet-200 text-violet-600">{v.alternatives} alt.</span>:null}
+                            </div>
+                            {!v.isInput&&v.formula&&<p className="text-xs font-mono text-gray-400 mt-0.5 truncate">{v.formula}</p>}
+                          </div>
+                          <button onClick={()=>onEditVar({id:v.id,name:v.name,scope:v.scope,isInput:v.isInput,formula:v.formula,groupId:v.groupId,alternatives:v.alternatives?Array(v.alternatives).fill({trigger:'',formula:''}):[],_apiId:v._apiId,templateId:activeId})}
+                            className="text-gray-300 hover:text-sky-500 text-sm w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white transition-all shrink-0 opacity-0 group-hover:opacity-100">✎</button>
+                        </div>
+                      ))}
+                      {sv.length===0&&<p className="text-sm text-gray-400 text-center py-6">Sem variáveis.</p>}
+                    </div>
+                  ))}
+                  {vars.length===0&&!loadingVars&&<p className="text-sm text-gray-400 text-center py-6">Sem variáveis. Adiciona a primeira.</p>}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between shrink-0">
+              <button onClick={()=>onAddVar(activeId)} className="px-4 py-2 text-sm text-sky-600 hover:text-sky-800 font-semibold transition-colors">+ Adicionar variável</button>
+              <div className="flex gap-2">
+                <button onClick={onClose} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">Cancelar</button>
+                <button onClick={handleSave} disabled={saving||!name.trim()} className="px-5 py-2 bg-gray-900 text-white text-sm rounded-xl hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium">
+                  {saving?'A guardar...':'Guardar Template'}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      {deleting&&(
+        <>
+          <div className="fixed inset-0 bg-black/20 z-[60]" onClick={()=>setDeleting(false)}/>
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] bg-white rounded-2xl shadow-2xl border border-gray-100 w-80 p-6 text-center">
+            <p className="font-semibold text-gray-800 mb-1">Eliminar template?</p>
+            <p className="text-sm text-gray-400 mb-5 truncate">{activeTemplate?.name}</p>
+            <div className="flex gap-3">
+              <button onClick={()=>setDeleting(false)} className="flex-1 px-4 py-2 border border-gray-200 rounded-xl text-sm text-gray-600 hover:bg-gray-50">Cancelar</button>
+              <button onClick={handleDelete} className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold">Eliminar</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HAMBURGER MENU
+   ═══════════════════════════════════════════════════════════════ */
+function HamburgerMenu({ open, onClose, onTemplate, onProject, onAdmin }) {
+  if (!open) return null
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/30 z-40" onClick={onClose}/>
+      <div className="fixed left-0 top-0 h-full w-64 bg-white shadow-2xl z-50 flex flex-col">
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center"><span className="text-white text-xs font-bold">∑</span></div>
+            <span className="font-bold text-gray-900 text-sm">Motor de Cálculo</span>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">×</button>
+        </div>
+        <nav className="flex-1 p-3 flex flex-col gap-0.5 overflow-y-auto">
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 py-2">Configuração</p>
+          <button onClick={()=>{onTemplate();onClose()}} className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
+            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">∑</span>Templates
+          </button>
+          <button onClick={()=>{onProject();onClose()}} className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
+            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">🏢</span>Projectos
+          </button>
+          <button onClick={()=>{onAdmin();onClose()}} className="flex items-center gap-3 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 rounded-xl text-left w-full transition-colors">
+            <span className="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center">⚙️</span>Tipos de Versão e Grupos
+          </button>
+        </nav>
+        <div className="p-4 border-t border-gray-100">
+          <p className="text-xs text-gray-400 text-center">Motor de Cálculo v1.0</p>
+        </div>
+      </div>
+    </>
+  )
+}
+
+
+
 export default function App(){
   const ctr = useRef(2)
 
@@ -3014,8 +2186,6 @@ export default function App(){
   const [showTemplate, setShowTemplate] = useState(false)
   const [showProject,  setShowProject]  = useState(false)
   const [editingProjectId, setEditingProjectId] = useState(null)  // null = list, id = edit specific project
-  const [activeTest,   setActiveTest]   = useState(null)
-  const [showDict,     setShowDict]     = useState(false)
 
   // ── Hamburger menu + dual panel ───────────────────────
   const [menuOpen,     setMenuOpen]     = useState(false)
@@ -3036,7 +2206,6 @@ export default function App(){
   const [panel2VerId,  setPanel2VerId]  = useState(null)
 
   // ── Filtros — painel 1 ────────────────────────────────
-  const [filterScope1, setFilterScope1] = useState('')   // '' | 'template' | 'language' | 'lob'
   // Filtro de variáveis afectadas — activado automaticamente após cada cálculo
   const [filterAffected1, setFilterAffected1] = useState(false)
   const [filterGroup1,    setFilterGroup1]    = useState('')   // '' | groupId as string
@@ -3046,7 +2215,6 @@ export default function App(){
   const [filterVar1,   setFilterVar1]   = useState('')
 
   // ── Filtros — painel 2 ────────────────────────────────
-  const [filterScope2, setFilterScope2] = useState('')
   const [filterType2,  setFilterType2]  = useState('')
   const [filterLang2,  setFilterLang2]  = useState('')
   const [filterLob2,   setFilterLob2]   = useState('')
@@ -3087,23 +2255,9 @@ export default function App(){
   const isDirtyCell = (vid,lid,bid,period,verId=activeVerId) => dirtyKeys.has(mk(project.id,verId,period,vid,lid,bid))
   const isVarDirty  = vid => dirtyVarIds.has(vid)
 
-  // ── Test helpers ──────────────────────────────────────────
-  const testTargets = useMemo(()=>new Set(activeTest?.targets??[]),[activeTest])
-  const isTarget    = vid => testTargets.has(vid)
-  const updateOrder = useMemo(()=>activeTest?computeUpdateOrder(vars,activeTest.targets):{},[activeTest,vars])
-  const handleSelectTest     = t => {setActiveTest(t);setDirtyKeys(new Set())}
-  const handleLaunchFromDict = id => {const t=TESTS.find(x=>x.id===id);if(t){setActiveTest(t);setDirtyKeys(new Set())};setShowDict(false)}
-
-  // ── Template handlers ─────────────────────────────────────
-  const handleSaveTemplate = async (newTpl) => {
-    // newTpl = { id, name, description } — vars are managed separately via VarModal
-    const rawId = parseInt(newTpl.id.replace('tpl_',''))
-    try {
-      await api.put(`/admin/templates/${rawId}`, { code: newTpl.id, name: newTpl.name, description: newTpl.description })
-    } catch(e) { console.error('Save template:', e) }
-    setTemplates(prev => prev.map(t => t.id===newTpl.id ? {...t, name:newTpl.name, description:newTpl.description} : t))
-    setShowTemplate(false)
-  }
+  // ── Test helpers (disabled — no active test mode) ─────────
+  const isTarget    = _vid => false
+  const updateOrder = {}
 
   const handleNewTemplate = async () => {
     try {
@@ -3611,8 +2765,8 @@ export default function App(){
   const affectedVarIds1 = filterAffected1 && deltaLog.length
     ? new Set(deltaLog.map(e => e.varCode))
     : null
-  const rows1 = applyFilters(rows, filterScope1, filterType1, filterLang1, filterLob1, filterVar1, affectedVarIds1, filterGroup1)
-  const rows2 = applyFilters(rows, filterScope2, filterType2, filterLang2, filterLob2, filterVar2, null, null)
+  const rows1 = applyFilters(rows, '', filterType1, filterLang1, filterLob1, filterVar1, affectedVarIds1, filterGroup1)
+  const rows2 = applyFilters(rows, '', filterType2, filterLang2, filterLob2, filterVar2, null, null)
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
@@ -3621,7 +2775,6 @@ export default function App(){
       <HamburgerMenu open={menuOpen} onClose={()=>setMenuOpen(false)}
         onTemplate={()=>setShowTemplate(true)}
         onProject={()=>{ setShowProject(true); setEditingProjectId(null) }}
-        onDict={()=>setShowDict(true)}
         onAdmin={()=>setShowAdmin(true)}/>
 
       {/* ── Header ── */}
@@ -3648,16 +2801,11 @@ export default function App(){
         <div className="flex items-center gap-2 shrink-0">
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide shrink-0">Teste</label>
           <div className="relative">
-            <select value={activeTest?.id??""} onChange={e=>handleSelectTest(TESTS.find(t=>t.id===e.target.value)??null)}
-              className="pl-3 pr-8 py-1.5 text-sm border border-gray-300 rounded-xl bg-white outline-none focus:border-sky-400 appearance-none cursor-pointer min-w-52">
-              <option value="">— seleciona —</option>
-              {TESTS.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}
-            </select>
+
             <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd"/></svg>
           </div>
         </div>
 
-        {activeTest&&<div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 border border-green-200 rounded-xl text-xs text-green-700 max-w-xs shrink-0"><span className="w-2 h-2 rounded-full bg-green-500 shrink-0 animate-pulse"/><span className="truncate">{activeTest.desc}</span><button onClick={()=>handleSelectTest(null)} className="text-green-500 hover:text-green-700 font-bold ml-1 shrink-0">×</button></div>}
         {hasDirty&&<div className="flex items-center gap-2 px-3 py-1.5 bg-orange-50 border border-orange-200 rounded-xl shrink-0"><span className="w-2 h-2 rounded-full bg-orange-400"/><span className="text-xs text-orange-700 font-medium">{dirtyVarIds.size} var. modificada{dirtyVarIds.size!==1?"s":""}</span><button onClick={()=>setDirtyKeys(new Set())} className="text-orange-500 hover:text-orange-700 text-xs font-bold ml-1">×</button></div>}
 
         <div className="flex-1"/>
@@ -3780,13 +2928,12 @@ export default function App(){
             {/* ── Filtros Painel 1 ── */}
             <div className="flex items-center gap-2 flex-wrap">
               <GridFilters project={project}
-                filterScope={filterScope1} setFilterScope={setFilterScope1}
                 filterType={filterType1}   setFilterType={setFilterType1}
+                filterGroup={filterGroup1} setFilterGroup={setFilterGroup1}
                 filterLang={filterLang1}   setFilterLang={setFilterLang1}
                 filterLob={filterLob1}     setFilterLob={setFilterLob1}
                 filterVar={filterVar1}     setFilterVar={setFilterVar1}
-                filterGroup={filterGroup1} setFilterGroup={setFilterGroup1}
-                availableGroups={availableGroups}/>
+                groups={availableGroups}/>
               {/* Pill de variáveis afectadas */}
               {deltaLog.length > 0 && (
                 <div className="flex items-center gap-1.5 shrink-0">
@@ -3844,8 +2991,8 @@ export default function App(){
                     const prevGroupId=prev?.v?.groupId
                     const showGroupHeader=isFirst&&v.groupId&&v.groupId!==prevGroupId
                     const sc=SC[v.scope];const inp=isInput(v)
-                    const varDirty=isVarDirty(v.id);const varTarget=isTarget(v.id)
-                    const seqNum=updateOrder[v.id];const rowBg=varTarget?"bg-green-50/60":inp?"bg-cyan-50/40":sc.bg
+                    const varDirty=isVarDirty(v.id)
+                    const rowBg=inp?"bg-cyan-50/40":sc.bg
                     const borderCls=isFirst&&isLast?"border-t-2 border-t-gray-300 border-b-2 border-b-gray-300"
                                    :isFirst?"border-t-2 border-t-gray-300 border-b border-b-gray-100"
                                    :isLast?"border-b-2 border-b-gray-300 border-t-0"
@@ -3864,17 +3011,17 @@ export default function App(){
                       <tr key={`row-${v.id}-${lid}-${bid}`} className={`transition-colors ${rowBg} ${borderCls}`}>
                         <td className="px-4 py-2 align-top">
                           {isFirst&&(<div className="relative pr-5">
-                            <OrderBadge n={seqNum}/>
+                            
                             <div className="flex items-center gap-1.5 group">
-                              <span className={`font-semibold text-sm transition-colors ${varDirty?"text-orange-700":varTarget?"text-green-700":"text-gray-800"}`}>{v.name}</span>
-                              {varTarget&&!varDirty&&<span className="text-green-500 text-xs animate-pulse">●</span>}
+                              <span className={`font-semibold text-sm transition-colors ${varDirty?"text-orange-700":"text-gray-800"}`}>{v.name}</span>
+                              
                               {varDirty&&<span className="text-orange-400 text-xs">●</span>}
                               <button onClick={()=>setModal(v)} className="text-gray-300 hover:text-sky-500 opacity-0 group-hover:opacity-100 text-xs transition-all">✎</button>
                             </div>
-                            <div className={`text-xs font-mono mt-0.5 ${varDirty?"text-orange-500":varTarget?"text-green-600":"text-gray-400"}`}>{v.id}</div>
+                            <div className={`text-xs font-mono mt-0.5 ${varDirty?"text-orange-500":"text-gray-400"}`}>{v.id}</div>
                             {!inp&&!v.alternatives?.length&&v.formula&&<div className="text-xs text-gray-400 font-mono mt-0.5 max-w-44 truncate" title={v.formula}>{v.formula}</div>}
                             {!inp&&v.alternatives?.length>0&&<div className="text-xs text-violet-500 mt-0.5 font-medium">{v.alternatives.length} alternativa{v.alternatives.length>1?"s":""}</div>}
-                            {varTarget&&inp&&<div className="text-xs text-green-600 font-semibold mt-0.5">← edita este valor</div>}
+                            
                           </div>)}
                         </td>
                         <td className="px-3 py-2 align-top">
@@ -3886,7 +3033,7 @@ export default function App(){
 
                           const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period)
                           const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
-                          const dirty=isDirtyCell(v.id,lid,bid,period);const toEdit=varTarget&&inp
+                          const dirty=isDirtyCell(v.id,lid,bid,period);const toEdit=inp
                           return(<td key={period} className="border-l border-gray-100 p-0">{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv)} locked={isCellLocked(period)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty} status={cs?.status}/>}</td>)
                         })}
                         {canCompare&&periods.flatMap(period=>{
@@ -3894,7 +3041,7 @@ export default function App(){
                             const key=mk(project.id,ver.id,period,v.id,lid,bid);const cs=cells[key]
                             const val=cs?.value;const activeFm=getActiveFm(v,lid,bid,period,ver.id)
                             const altFm=(v.alternatives?.length&&activeFm!==v.formula)?activeFm:undefined
-                            const dirty=isDirtyCell(v.id,lid,bid,period,ver.id);const toEdit=varTarget&&inp
+                            const dirty=isDirtyCell(v.id,lid,bid,period,ver.id);const toEdit=inp
                             return(<td key={`${period}-${ver.id}`} className={`${vi===0?"border-l-2 border-gray-300":"border-l border-gray-100"} p-0`}>{inp?<EditableCell value={val} dirty={dirty} toEdit={toEdit} onChange={nv=>handleCellChange(v.id,lid,bid,period,nv,ver.id)} locked={isCellLocked(period)}/>:<CalcCell value={val} formula={v.formula} altFormula={altFm} activeTriggerId={cs?.activeTriggerId} dirty={dirty} status={cs?.status}/>}</td>)
                           })
                           if(!showDelta)return vCells
@@ -3937,7 +3084,6 @@ export default function App(){
 
           {/* Filtros painel 2 */}
           <GridFilters project={project}
-            filterScope={filterScope2} setFilterScope={setFilterScope2}
             filterType={filterType2}   setFilterType={setFilterType2}
             filterLang={filterLang2}   setFilterLang={setFilterLang2}
             filterLob={filterLob2}     setFilterLob={setFilterLob2}
@@ -4126,10 +3272,206 @@ export default function App(){
             onClose={()=>setEditingProjectId(null)}/>
         )
       })()}
-      {showDict&&<DictModal onClose={()=>setShowDict(false)} onLaunch={handleLaunchFromDict}/>}
       {modal&&<VarModal variable={modal==="new"?null:modal} variables={vars} client={project}
         onSave={handleSaveVar} onClose={()=>setModal(null)}
         onDelete={modal!=="new"?()=>handleDelVar(modal.id):null}/>}
     </div>
   )
 }
+/* ── Grid cell components ──────────────────────────────────── */
+function OrderBadge({ n }) {
+  if (n == null) return null
+  return (
+    <div className={`absolute top-0 right-0 flex items-center justify-center rounded-full bg-indigo-500 text-white font-bold leading-none shadow-md border-2 border-white z-10 ${n > 9 ? "min-w-[22px] h-[18px] px-1 text-[9px]" : "w-[18px] h-[18px] text-[10px]"}`}>
+      {n}
+    </div>
+  )
+}
+
+function Badge({ children, color, scope }) {
+  // When used as <Badge scope="lob"/> it renders the scope label with its colour
+  if (scope) {
+    const scopeMap = {
+      lob:      { label: 'LOB',      cls: 'bg-blue-50 text-blue-600 border border-blue-100' },
+      language: { label: 'Language', cls: 'bg-amber-50 text-amber-600 border border-amber-100' },
+      project:  { label: 'Project',  cls: 'bg-emerald-50 text-emerald-700 border border-emerald-100' },
+    }
+    const s = scopeMap[scope] ?? { label: scope, cls: 'bg-gray-100 text-gray-500' }
+    return <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${s.cls}`}>{s.label}</span>
+  }
+  const cls = {
+    gray:   "bg-gray-100 text-gray-500",
+    blue:   "bg-blue-50 text-blue-600",
+    violet: "bg-violet-50 text-violet-600",
+    amber:  "bg-amber-50 text-amber-600",
+    red:    "bg-red-50 text-red-600",
+  }[color ?? "gray"] ?? "bg-gray-100 text-gray-500"
+  return <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${cls}`}>{children}</span>
+}
+
+function EditableCell({ value, onChange, dirty, locked }) {
+  const [editing, setEditing] = useState(false)
+  const [draft,   setDraft]   = useState("")
+  const ref = useRef(null)
+
+  const start = () => {
+    if (locked) return
+    setDraft(value != null ? String(value) : "")
+    setEditing(true)
+    setTimeout(() => ref.current?.select(), 0)
+  }
+
+  const commit = () => {
+    setEditing(false)
+    const n = parseFloat(draft.replace(",", "."))
+    if (!isNaN(n) && n !== value) onChange(n)
+  }
+
+  if (locked === "locked") return (
+    <div className="w-full h-full flex items-center justify-end px-3 text-amber-400 cursor-not-allowed text-xs">🔒</div>
+  )
+
+  if (editing) return (
+    <input ref={ref} value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false) }}
+      className="w-full h-full text-right px-3 text-sm font-mono outline-none bg-sky-50 border-2 border-sky-400 rounded"/>
+  )
+
+  return (
+    <div onClick={start}
+      className={`w-full h-full flex items-center justify-end px-3 text-sm font-mono cursor-pointer select-none rounded
+        ${dirty ? "text-orange-700 font-semibold bg-orange-50" : "text-gray-700 hover:bg-sky-50"}`}>
+      {value != null ? value.toLocaleString("pt-PT", { maximumFractionDigits: 4 }) : <span className="text-gray-300">—</span>}
+    </div>
+  )
+}
+
+function CalcCell({ value, status, formulaExpression, formulaNames }) {
+  const isErr  = status === "Error"
+  const isCirc = status === "Circular"
+  const isEmpty = value == null && !isErr && !isCirc
+
+  if (isCirc) return (
+    <div className="w-full h-full flex items-center justify-end px-3">
+      <span className="text-xs font-bold text-violet-500">CIRC</span>
+    </div>
+  )
+  if (isErr) return (
+    <div className="w-full h-full flex items-center justify-end px-3">
+      <span className="text-xs font-bold text-red-500">ERR</span>
+    </div>
+  )
+  if (isEmpty) return (
+    <div className="w-full h-full flex items-center justify-end px-3 text-gray-300 text-xs">—</div>
+  )
+
+  return (
+    <div className="w-full h-full flex items-center justify-end px-3 text-sm font-mono text-gray-600 select-none"
+      title={formulaNames || formulaExpression || ""}>
+      {value != null ? value.toLocaleString("pt-PT", { maximumFractionDigits: 4 }) : "—"}
+    </div>
+  )
+}
+
+function DeltaCell({ before, after, status }) {
+  if (before == null && after == null) return <div className="w-full h-full flex items-center justify-end px-2 text-gray-200 text-xs">—</div>
+
+  const isErr = status === "Error"
+  const diff  = (after ?? 0) - (before ?? 0)
+  const pct   = before && before !== 0 ? ((diff / Math.abs(before)) * 100) : null
+  const sign  = diff > 0 ? "+" : ""
+  const cls   = diff > 0 ? "text-emerald-600" : diff < 0 ? "text-red-500" : "text-gray-400"
+
+  if (isErr) return <div className="w-full h-full flex items-center justify-end px-2 text-red-400 text-xs font-bold">ERR</div>
+
+  return (
+    <div className={`w-full h-full flex flex-col items-end justify-center px-2 ${cls}`}>
+      <span className="text-xs font-semibold font-mono">{sign}{diff.toLocaleString("pt-PT", { maximumFractionDigits: 2 })}</span>
+      {pct != null && <span className="text-[10px] opacity-70">{sign}{pct.toFixed(1)}%</span>}
+    </div>
+  )
+}
+
+function GridFilters({
+  project,
+  filterType,  setFilterType,
+  filterGroup, setFilterGroup,
+  filterLang,  setFilterLang,
+  filterLob,   setFilterLob,
+  filterVar,   setFilterVar,
+  groups
+}) {
+  const langs = project?.languages ?? []
+  const selectedLang = langs.find(l => l.code === filterLang)
+  const lobs = filterLang && selectedLang ? selectedLang.lobs : langs.flatMap(l => l.lobs)
+
+  const hasFilters = filterType || filterGroup || filterLang || filterLob || filterVar
+  const clearAll   = () => {
+    setFilterType?.('')
+    setFilterGroup?.('')
+    setFilterLang('')
+    setFilterLob('')
+    setFilterVar('')
+  }
+
+  const selCls = active =>
+    `text-xs px-2.5 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 cursor-pointer transition-colors
+     ${active ? 'border-sky-400 text-sky-700 bg-sky-50 font-medium' : 'border-gray-200 text-gray-600'}`
+
+  return (
+    <div className="bg-white border-b border-gray-100 px-4 py-2 flex items-center gap-2 shrink-0">
+      <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider shrink-0 mr-1">Filtros</span>
+
+      {/* Tipo: entradas / calculadas / todas */}
+      <select value={filterType ?? ''} onChange={e=>setFilterType?.(e.target.value)}
+        className={selCls(filterType)} style={{minWidth:'9rem'}}>
+        <option value="">Todas as métricas</option>
+        <option value="input">Só entradas</option>
+        <option value="calculated">Só fórmulas</option>
+      </select>
+
+      {/* Grupo de variáveis */}
+      <select value={filterGroup ?? ''} onChange={e=>setFilterGroup?.(e.target.value)}
+        className={selCls(filterGroup)} style={{minWidth:'9rem'}}>
+        <option value="">Todos os grupos</option>
+        {(groups ?? []).map(g=>typeof g==='object' ? <option key={g.id} value={g.id}>{g.name}</option> : <option key={g} value={g}>{g}</option>)}
+      </select>
+
+      <div className="w-px h-4 bg-gray-200 mx-1 shrink-0"/>
+
+      {/* Língua */}
+      <select value={filterLang} onChange={e=>{ setFilterLang(e.target.value); setFilterLob('') }}
+        className={selCls(filterLang)} style={{minWidth:'9rem'}}>
+        <option value="">Todas as línguas</option>
+        {langs.map(l=><option key={l.id} value={l.code}>{l.code} — {l.name}</option>)}
+      </select>
+
+      {/* LOB */}
+      <select value={filterLob} onChange={e=>setFilterLob(e.target.value)}
+        className={selCls(filterLob)} style={{minWidth:'9rem'}}>
+        <option value="">Todos os LOBs</option>
+        {lobs.map(b=><option key={b.id} value={b.code}>{b.code} — {b.name}</option>)}
+      </select>
+
+      <div className="w-px h-4 bg-gray-200 mx-1 shrink-0"/>
+
+      {/* Pesquisa por nome/código */}
+      <input value={filterVar} onChange={e=>setFilterVar(e.target.value)}
+        placeholder="Pesquisar variável..."
+        className={`text-xs px-3 py-1.5 border rounded-lg bg-white outline-none focus:border-sky-400 transition-colors
+          ${filterVar ? 'border-sky-400 text-sky-700 bg-sky-50' : 'border-gray-200 text-gray-600'}`}
+        style={{minWidth:'10rem'}}/>
+
+      {/* Limpar — ocupa sempre o espaço mas só é visível quando há filtros */}
+      <button onClick={clearAll}
+        className={`text-xs font-medium transition-all shrink-0 ml-1
+          ${hasFilters ? 'text-red-400 hover:text-red-600 opacity-100' : 'opacity-0 pointer-events-none'}`}>
+        × Limpar
+      </button>
+    </div>
+  )
+}
+
+
